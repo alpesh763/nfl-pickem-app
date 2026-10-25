@@ -84,6 +84,14 @@ async function loadPool() {
   render('playingList', pool.playing);
   render('notPartList', pool.notParticipating);
   render('noRespList', pool.noResponse);
+  // Highlight the button matching YOUR current choice, so it's obvious at a
+  // glance whether you're playing or sitting out. (Previously "I'm playing"
+  // was always orange and "Not participating" never was, so a
+  // not-participating choice looked unconfirmed.)
+  const myStatus = me && (pool.playing.some((p) => p.id === me.id) ? 'playing'
+    : pool.notParticipating.some((p) => p.id === me.id) ? 'not_participating' : null);
+  $('playBtn').classList.toggle('primary', myStatus === 'playing');
+  $('skipBtn').classList.toggle('primary', myStatus === 'not_participating');
 }
 
 async function loadPicks() {
