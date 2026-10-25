@@ -46,3 +46,14 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid #374151; }
 .rec-row label { margin: 0; display: flex; gap: 4px; align-items: center; }
 .rec-row input { width: 64px; margin-top: 0; }
 .user-bar { display: flex; gap: 10px; align-items: center; }
+.pwWrap { position: relative; display: block; }
+.pwWrap input { padding-right: 44px; }
+.pwToggle { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: none; border: none; padding: 6px; font-size: 1.1rem; line-height: 1; }
+.pickMatchup { display: flex; gap: 10px; align-items: stretch; margin: 8px 0; }
+.pickMatchup .vs { color: #9ca3af; align-self: center; }
+.pickBtn { flex: 1; display: flex; align-items: center; gap: 10px; background: #111827; border: 2px solid #374151; padding: 10px 12px; text-align: left; }
+.pickBtn.selected { border-color: #f97316; background: #3a2408; }
+.pickBtn:disabled { opacity: 0.6; }
+.pickBtn .team { display: flex; flex-direction: column; }
+.pickBtn .team .record { color: #fbbf24; font-weight: 700; font-size: 0.9rem; }
+.teamLogo { width: 40px; height: 40px; object-fit: contain; flex-shrink: 0; }

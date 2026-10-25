@@ -5,6 +5,17 @@ const $ = (id) => document.getElementById(id);
 let me = null;
 let pool = null;
 let myPicks = {};
+
+// NFL team nickname -> ESPN logo abbreviation (logos via ESPN's public team-logo CDN).
+const TEAM_ABBR = {
+  '49ers': 'sf', Bears: 'chi', Bengals: 'cin', Bills: 'buf', Broncos: 'den', Browns: 'cle',
+  Buccaneers: 'tb', Cardinals: 'ari', Chargers: 'lac', Chiefs: 'kc', Colts: 'ind', Commanders: 'wsh',
+  Cowboys: 'dal', Dolphins: 'mia', Eagles: 'phi', Falcons: 'atl', Giants: 'nyg', Jaguars: 'jax',
+  Jets: 'nyj', Lions: 'det', Packers: 'gb', Panthers: 'car', Patriots: 'ne', Raiders: 'lv',
+  Rams: 'lar', Ravens: 'bal', Saints: 'no', Seahawks: 'sea', Steelers: 'pit', Texans: 'hou',
+  Titans: 'ten', Vikings: 'min',
+};
+const teamLogoUrl = (team) => 'https://a.espncdn.com/i/teamlogos/nfl/500/' + (TEAM_ABBR[team] || '') + '.png';
 let currentTab = 'pool';
 
 async function api(path, method, body) {
@@ -84,15 +95,27 @@ async function loadPicks() {
   $('pickCostLine').textContent = 'Each pick costs ' + fmtMoney(pool.perPickAmount) + '. Full sheet (' + pool.games.length + ' picks) = ' + fmtMoney(pool.perPickAmount * pool.games.length) + '.';
   $('gamesList').innerHTML = pool.games.map((g) => {
     const sel = myPicks[g.id] || '';
-    const teamBlock = (team, rec) => '<div class="team"><b>' + team + '</b>' + (rec ? '<span class="record">' + rec + '</span>' : '') + '</div>';
-    return '<div class="game-row"><div><div class="matchup">' + teamBlock(g.away, g.awayRecord) + '<span class="at">at</span>' + teamBlock(g.home, g.homeRecord) + '</div>' +
-      '<div class="kick">' + g.kickoffLabel + (g.winner ? ' · Winner: ' + g.winner : '') + '</div></div>' +
-      '<select data-game="' + g.id + '" ' + (locked ? 'disabled' : '') + '>' +
-      '<option value="">Pick a winner…</option>' +
-      '<option value="' + g.away + '"' + (sel === g.away ? ' selected' : '') + '>' + g.away + '</option>' +
-      '<option value="' + g.home + '"' + (sel === g.home ? ' selected' : '') + '>' + g.home + '</option>' +
-      '</select></div>';
+    const pickBtn = (team, rec) => {
+      const abbr = TEAM_ABBR[team];
+      const img = abbr ? '<img class="teamLogo" src="' + teamLogoUrl(team) + '" alt="" onerror="this.style.display=\'none\'">' : '';
+      return '<button type="button" class="pickBtn' + (sel === team ? ' selected' : '') + '" data-game="' + g.id + '" data-team="' + team + '" ' + (locked ? 'disabled' : '') + '>' + img +
+        '<span class="team"><b>' + team + '</b>' + (rec ? '<span class="record">' + rec + '</span>' : '') + '</span></button>';
+    };
+    return '<div class="game-row"><div class="kick">' + g.kickoffLabel + (g.winner ? ' · Winner: ' + g.winner : '') + '</div>' +
+      '<div class="pickMatchup">' + pickBtn(g.away, g.awayRecord) + '<span class="vs">vs</span>' + pickBtn(g.home, g.homeRecord) + '</div></div>';
   }).join('');
+  // Tap a team to pick it; tap the picked team again to clear it.
+  document.querySelectorAll('.pickBtn').forEach((btn) => btn.addEventListener('click', () => {
+    const gid = btn.dataset.game;
+    const team = btn.dataset.team;
+    if (myPicks[gid] === team) {
+      delete myPicks[gid];
+      btn.classList.remove('selected');
+    } else {
+      myPicks[gid] = team;
+      document.querySelectorAll('.pickBtn[data-game="' + gid + '"]').forEach((b) => b.classList.toggle('selected', b === btn));
+    }
+  }));
 }
 
 async function loadStandings() {
@@ -187,34 +210,61 @@ async function loadRecords() {
 // ------------------------------------------------------------ events
 document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
 
-$('signInBtn').addEventListener('click', async () => {
+// Show/hide password (eyeball) toggles.
+document.querySelectorAll('.pwToggle').forEach((btn) => btn.addEventListener('click', () => {
+  const input = document.getElementById(btn.dataset.target);
+  if (!input) return;
+  const show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  btn.textContent = show ? '🙈' : '👁';
+  btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+}));
+
+function showAuthForm(which) {
+  $('signInForm').classList.toggle('hidden', which !== 'signin');
+  $('registerForm').classList.toggle('hidden', which !== 'register');
+  $('authError').classList.add('hidden');
+}
+$('toRegisterBtn').addEventListener('click', () => showAuthForm('register'));
+$('toSignInBtn').addEventListener('click', () => showAuthForm('signin'));
+
+$('signInForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
   $('authError').classList.add('hidden');
   try {
-    const data = await api('/api/login', 'POST', { username: $('username').value, password: $('password').value });
+    const data = await api('/api/login', 'POST', { username: $('siUsername').value, password: $('siPassword').value });
     me = data.user;
     await refreshMe();
     showTab('pool');
-  } catch (e) {
+  } catch (err) {
     // If the admin account has no password yet, offer the one-time setup.
-    if ($('username').value.trim().toLowerCase() === 'admin') $('adminSetup').classList.remove('hidden');
-    $('authError').textContent = e.message;
+    if ($('siUsername').value.trim().toLowerCase() === 'admin') $('adminSetup').classList.remove('hidden');
+    $('authError').textContent = err.message;
     $('authError').classList.remove('hidden');
   }
 });
 
-$('registerBtn').addEventListener('click', async () => {
+$('registerForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
   $('authError').classList.add('hidden');
-  if (!$('fullname').value.trim()) {
+  if (!$('regName').value.trim()) {
     $('authError').textContent = 'Full name is required to create an account.';
     $('authError').classList.remove('hidden');
     return;
   }
+  if ($('regPassword').value !== $('regConfirm').value) {
+    $('authError').textContent = 'Passwords do not match.';
+    $('authError').classList.remove('hidden');
+    return;
+  }
   try {
-    await api('/api/register', 'POST', { name: $('fullname').value, username: $('username').value, password: $('password').value });
+    await api('/api/register', 'POST', { name: $('regName').value, username: $('regUsername').value, password: $('regPassword').value });
     $('authMsg').textContent = 'Account created. Sign in now.';
     $('authMsg').classList.remove('hidden');
-  } catch (e) {
-    $('authError').textContent = e.message;
+    $('siUsername').value = $('regUsername').value;
+    showAuthForm('signin');
+  } catch (err) {
+    $('authError').textContent = err.message;
     $('authError').classList.remove('hidden');
   }
 });
@@ -270,10 +320,10 @@ $('skipBtn').addEventListener('click', async () => {
 });
 
 $('savePicksBtn').addEventListener('click', async () => {
-  const picks = [];
-  document.querySelectorAll('[data-game]').forEach((sel) => {
-    if (sel.value) picks.push({ game_id: Number(sel.dataset.game), team: sel.value });
-  });
+  const gameIds = new Set((pool.games || []).map((g) => String(g.id)));
+  const picks = Object.entries(myPicks)
+    .filter(([gid]) => gameIds.has(gid))
+    .map(([game_id, team]) => ({ game_id: Number(game_id), team }));
   try {
     await api('/api/picks', 'POST', { picks });
     $('saveMsg').textContent = 'Picks saved (' + picks.length + ').';
