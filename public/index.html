@@ -19,28 +19,57 @@
 </header>
 
 <main>
-  <!-- Auth view -->
-  <section id="authView" class="card">
-    <h2>Sign in</h2>
-    <p class="muted">Players sign in with their own username and password. The admin signs in as <b>admin</b>.</p>
-    <label>Username <input id="username" autocomplete="username"></label>
-    <label>Password <input id="password" type="password" autocomplete="current-password"></label>
-    <p id="authError" class="error hidden"></p>
-    <div class="row">
-      <button id="signInBtn" class="primary">Sign in</button>
-      <button id="registerBtn">Create account</button>
+  <!-- Auth / landing view -->
+  <section id="authView">
+    <div class="hero">
+      <p class="hero-eyebrow">🏈 Weekly pool · $0.50 a pick</p>
+      <h2 class="hero-title">Pick the winners.<br>Split the pot.</h2>
+      <p class="hero-sub">One shared pool for the whole crew. Everyone can see who is playing, who is sitting out, and who has not answered yet — and everything flows back to the admin.</p>
     </div>
-    <p id="authMsg" class="muted hidden"></p>
-    <div id="adminSetup" class="hidden">
-      <h3>First-time admin setup</h3>
-      <p class="muted">The admin account has no password yet. Set one now (one-time only).</p>
-      <label>New admin password <input id="adminPassword" type="password"></label>
-      <button id="adminSetupBtn" class="primary">Set admin password</button>
+
+    <div class="card instructions">
+      <h3>How it works</h3>
+      <ol class="steps">
+        <li><b>Register</b> — enter your full name, pick a username, and set a password. Your name shows next to your username so everyone knows who is who.</li>
+        <li><b>Mark yourself Playing or Not participating</b> — everyone in the pool can see both lists.</li>
+        <li><b>Pick winners</b> on the My Picks tab — one pick per game. Each team's season record shows under its name to help you decide.</li>
+        <li><b>Lock:</b> <span id="heroLock">Mini Test — Oct 25–26 · picks lock Sun Oct 25 at 10:00 AM CT</span> — no picks after that.</li>
+        <li><b>Money:</b> <span id="heroCost">$0.50 per pick ($6.50 for a full 13-game sheet).</span> Pay and settle outside the app — the app only tracks who owes and who has paid.</li>
+        <li><b>Ties split the pot</b> — if two or more players tie for the most wins, they share that week's money.</li>
+      </ol>
+      <p class="muted">By playing, you accept the <a href="/disclaimer.html">Disclaimer</a>.</p>
+    </div>
+
+    <div class="card">
+      <h2>Sign in</h2>
+      <p class="muted">Returning players: username + password is enough. New here? Fill in all three fields, then tap Create account. The admin signs in as <b>admin</b>.</p>
+      <label>Full name <input id="fullname" autocomplete="name" placeholder="e.g. Alex Johnson"></label>
+      <label>Username <input id="username" autocomplete="username"></label>
+      <label>Password <input id="password" type="password" autocomplete="current-password"></label>
+      <p id="authError" class="error hidden"></p>
+      <div class="row">
+        <button id="signInBtn" class="primary">Sign in</button>
+        <button id="registerBtn">Create account</button>
+      </div>
+      <p id="authMsg" class="muted hidden"></p>
+      <div id="adminSetup" class="hidden">
+        <h3>First-time admin setup</h3>
+        <p class="muted">The admin account has no password yet. Set one now (one-time only).</p>
+        <label>New admin password <input id="adminPassword" type="password"></label>
+        <button id="adminSetupBtn" class="primary">Set admin password</button>
+      </div>
     </div>
   </section>
 
   <!-- Main app view -->
   <section id="appView" class="hidden">
+    <div id="namePrompt" class="card accent hidden">
+      <h3>One quick thing — add your name</h3>
+      <p class="muted">Usernames alone can be anyone, so the pool shows your real name next to your username. Add it once and you are set.</p>
+      <label>Full name <input id="namePromptInput" autocomplete="name"></label>
+      <button id="saveNameBtn" class="primary">Save my name</button>
+      <p id="namePromptMsg" class="muted"></p>
+    </div>
     <nav class="tabs">
       <button data-tab="pool" class="tab active">Pool</button>
       <button data-tab="picks" class="tab">My Picks</button>
@@ -118,6 +147,12 @@
         </table>
       </div>
       <div class="card">
+        <h2>Admin — Team records</h2>
+        <p class="muted">Season win–loss–tie shown under each team on the pick sheet. Edit here; records do not update automatically from game results.</p>
+        <div id="recordsList"></div>
+        <p id="recordsMsg" class="muted"></p>
+      </div>
+      <div class="card">
         <h2>Admin — Game results</h2>
         <p class="muted">Enter winners after games finish; standings update from these.</p>
         <div id="resultsList"></div>
@@ -130,7 +165,7 @@
   </section>
 </main>
 
-<footer>Powered by ALMI</footer>
+<footer>Powered by ALMI · <a href="/disclaimer.html">Disclaimer</a></footer>
 <script src="app.js"></script>
 </body>
 </html>

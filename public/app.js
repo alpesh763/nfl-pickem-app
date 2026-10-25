@@ -33,6 +33,7 @@ function showTab(tab) {
 }
 
 function fmtMoney(n) { return '$' + Number(n).toFixed(2); }
+function displayName(p) { return p.name ? p.name + ' (' + p.username + ')' : p.username; }
 function fmtLock(iso) {
   return new Date(iso).toLocaleString('en-US', { timeZone: 'America/Chicago', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' CT';
 }
@@ -41,9 +42,11 @@ async function refreshMe() {
   try {
     const data = await api('/api/me');
     me = data.user;
-    $('whoAmI').textContent = me.username + (me.isAdmin ? ' (Admin)' : '');
+    $('whoAmI').textContent = displayName(me) + (me.isAdmin ? ' (Admin)' : '');
     $('userBar').classList.remove('hidden');
     $('adminTabBtn').classList.toggle('hidden', !me.isAdmin);
+    // One-time prompt for accounts created before names existed.
+    $('namePrompt').classList.toggle('hidden', !(!me.isAdmin && !me.name));
     show('appView');
     return true;
   } catch {
@@ -64,7 +67,7 @@ async function loadPool() {
   $('lockLine').textContent = 'Picks lock ' + fmtLock(pool.week.lock_at) + ' · Status: ' + pool.week.status;
   const render = (el, list) => {
     $(el).innerHTML = list.length
-      ? list.map((p) => '<li>' + p.username + ' (' + p.pickCount + ' picks)</li>').join('')
+      ? list.map((p) => '<li>' + displayName(p) + ' (' + p.pickCount + ' picks)</li>').join('')
       : '<li class="muted">Nobody yet</li>';
   };
   render('playingList', pool.playing);
@@ -81,7 +84,9 @@ async function loadPicks() {
   $('pickCostLine').textContent = 'Each pick costs ' + fmtMoney(pool.perPickAmount) + '. Full sheet (' + pool.games.length + ' picks) = ' + fmtMoney(pool.perPickAmount * pool.games.length) + '.';
   $('gamesList').innerHTML = pool.games.map((g) => {
     const sel = myPicks[g.id] || '';
-    return '<div class="game-row"><div><b>' + g.away + ' at ' + g.home + '</b><div class="kick">' + g.kickoffLabel + (g.winner ? ' · Winner: ' + g.winner : '') + '</div></div>' +
+    const teamBlock = (team, rec) => '<div class="team"><b>' + team + '</b>' + (rec ? '<span class="record">' + rec + '</span>' : '') + '</div>';
+    return '<div class="game-row"><div><div class="matchup">' + teamBlock(g.away, g.awayRecord) + '<span class="at">at</span>' + teamBlock(g.home, g.homeRecord) + '</div>' +
+      '<div class="kick">' + g.kickoffLabel + (g.winner ? ' · Winner: ' + g.winner : '') + '</div></div>' +
       '<select data-game="' + g.id + '" ' + (locked ? 'disabled' : '') + '>' +
       '<option value="">Pick a winner…</option>' +
       '<option value="' + g.away + '"' + (sel === g.away ? ' selected' : '') + '>' + g.away + '</option>' +
@@ -94,7 +99,7 @@ async function loadStandings() {
   const data = await api('/api/standings');
   $('standingsLine').textContent = (data.week.label || 'Week ' + data.week.week_number) + ' · ' + data.decidedGames + ' of ' + data.totalGames + ' games decided.';
   document.querySelector('#standingsTable tbody').innerHTML = data.standings.map((s) =>
-    '<tr><td>' + s.username + '</td><td>' + s.wins + '</td><td>' + s.pickCount + '</td></tr>').join('');
+    '<tr><td>' + displayName(s) + '</td><td>' + s.wins + '</td><td>' + s.pickCount + '</td></tr>').join('');
   if (data.decidedGames === data.totalGames && data.winners.length) {
     $('winnerLine').classList.remove('hidden');
     $('winnerLine').textContent = 'Week winner' + (data.winners.length > 1 ? 's (tie — pot split)' : '') + ': ' + data.winners.join(', ') +
@@ -106,7 +111,7 @@ async function loadStandings() {
 
 async function loadMoney() {
   const data = await api('/api/standings');
-  const mine = data.standings.find((s) => s.username === me.username);
+  const mine = data.standings.find((s) => s.id === me.id);
   $('myMoneyLine').textContent = mine
     ? 'Your sheet: ' + mine.pickCount + ' picks · ' + fmtMoney(mine.owed) + ' owed · ' + (mine.paid ? 'Paid ✓' : 'Not paid yet')
     : 'You have no picks this week.';
@@ -122,7 +127,7 @@ async function loadAdmin() {
   $('wagerInput').value = data.perPickAmount;
   $('adminTotals').textContent = fmtMoney(data.collected) + ' collected · ' + fmtMoney(data.stillOwed) + ' still owed · ' + fmtMoney(data.owedTotal) + ' total owed.';
   document.querySelector('#paymentsTable tbody').innerHTML = data.players.map((p) =>
-    '<tr><td>' + p.username + '</td><td>' + p.status.replace('_', ' ') + '</td><td>' + p.pickCount + '</td><td>' + fmtMoney(p.owed) + '</td>' +
+    '<tr><td>' + displayName(p) + '</td><td>' + p.status.replace('_', ' ') + '</td><td>' + p.pickCount + '</td><td>' + fmtMoney(p.owed) + '</td>' +
     '<td><input type="checkbox" data-paid-user="' + p.id + '"' + (p.paid ? ' checked' : '') + '> Paid</td></tr>').join('');
   document.querySelectorAll('[data-paid-user]').forEach((cb) => {
     cb.addEventListener('change', async () => {
@@ -148,8 +153,35 @@ async function loadAdmin() {
       const pick = p.picks[g.id];
       return '<div>' + g.away + ' at ' + g.home + ': <b>' + (pick || '—') + '</b></div>';
     }).join('');
-    return '<div class="card"><h3>' + p.username + ' (' + p.status.replace('_', ' ') + ')</h3>' + lines + '</div>';
+    return '<div class="card"><h3>' + displayName(p) + ' (' + p.status.replace('_', ' ') + ')</h3>' + lines + '</div>';
   }).join('');
+  loadRecords();
+}
+
+async function loadRecords() {
+  const data = await api('/api/admin/records');
+  $('recordsList').innerHTML = data.records.map((r) =>
+    '<div class="rec-row" data-team="' + r.team + '"><b>' + r.team + '</b>' +
+    '<label>W <input type="number" min="0" max="30" data-rec-w value="' + r.wins + '"></label>' +
+    '<label>L <input type="number" min="0" max="30" data-rec-l value="' + r.losses + '"></label>' +
+    '<label>T <input type="number" min="0" max="30" data-rec-t value="' + r.ties + '"></label>' +
+    '<button data-rec-save>Save</button></div>').join('');
+  document.querySelectorAll('[data-rec-save]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const row = btn.closest('.rec-row');
+      try {
+        await api('/api/admin/records', 'POST', {
+          team: row.dataset.team,
+          wins: row.querySelector('[data-rec-w]').value,
+          losses: row.querySelector('[data-rec-l]').value,
+          ties: row.querySelector('[data-rec-t]').value,
+        });
+        $('recordsMsg').textContent = 'Saved ' + row.dataset.team + '.';
+      } catch (e) {
+        $('recordsMsg').textContent = e.message;
+      }
+    });
+  });
 }
 
 // ------------------------------------------------------------ events
@@ -172,13 +204,35 @@ $('signInBtn').addEventListener('click', async () => {
 
 $('registerBtn').addEventListener('click', async () => {
   $('authError').classList.add('hidden');
+  if (!$('fullname').value.trim()) {
+    $('authError').textContent = 'Full name is required to create an account.';
+    $('authError').classList.remove('hidden');
+    return;
+  }
   try {
-    await api('/api/register', 'POST', { username: $('username').value, password: $('password').value });
+    await api('/api/register', 'POST', { name: $('fullname').value, username: $('username').value, password: $('password').value });
     $('authMsg').textContent = 'Account created. Sign in now.';
     $('authMsg').classList.remove('hidden');
   } catch (e) {
     $('authError').textContent = e.message;
     $('authError').classList.remove('hidden');
+  }
+});
+
+$('saveNameBtn').addEventListener('click', async () => {
+  const name = $('namePromptInput').value.trim();
+  if (!name) {
+    $('namePromptMsg').textContent = 'Please enter your full name.';
+    return;
+  }
+  try {
+    await api('/api/me/name', 'POST', { name });
+    me.name = name;
+    $('whoAmI').textContent = displayName(me) + (me.isAdmin ? ' (Admin)' : '');
+    $('namePrompt').classList.add('hidden');
+    loadPool();
+  } catch (e) {
+    $('namePromptMsg').textContent = e.message;
   }
 });
 
@@ -244,6 +298,16 @@ $('saveSettingsBtn').addEventListener('click', async () => {
 
 // ------------------------------------------------------------- boot
 (async () => {
+  // Fill the landing page from public info (best effort; the static
+  // fallback text in the HTML already covers the mini test).
+  try {
+    const info = await api('/api/public-info');
+    const title = 'NFL WEEKLY PICKS' + (info.groupName ? ' — ' + info.groupName : '');
+    $('appTitle').textContent = title;
+    const weekName = info.week.label || ('Week ' + info.week.week_number);
+    $('heroLock').textContent = weekName + ' · picks lock ' + fmtLock(info.week.lock_at);
+    $('heroCost').textContent = fmtMoney(info.perPickAmount) + ' per pick (' + fmtMoney(info.fullSheetAmount) + ' for a full ' + info.gameCount + '-game sheet).';
+  } catch { /* keep static fallback text */ }
   const ok = await refreshMe();
   if (ok) showTab('pool');
 })();
