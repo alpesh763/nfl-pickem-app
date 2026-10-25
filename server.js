@@ -314,6 +314,87 @@ function weekStatus(week) {
   return 'open';
 }
 
+// ------------------------------------------------------------------ automatic results
+// Fully automatic result fetching: when anyone loads the pool or standings,
+// the server checks ESPN's public scoreboard for the current week's games
+// that still have no winner, and fills in winners for games that are final.
+// - Only fills games whose winner is still empty: an admin-entered result
+//   is never overwritten.
+// - Only final games count (ESPN status "post"); games still playing or
+//   not started are left alone.
+// - Throttled to one ESPN check per 10 minutes so normal browsing doesn't
+//   hammer the source.
+// - Any failure (source down, changed format, timeout) is logged and
+//   ignored: the app keeps working and manual entry still works.
+// - ESPN_SCOREBOARD_URL (env) overrides the base URL; tests use it to
+//   point at a local stub instead of the real source.
+const ESPN_BASE = process.env.ESPN_SCOREBOARD_URL || 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
+const ESPN_ABBR = {
+  '49ers': 'SF', Bears: 'CHI', Bengals: 'CIN', Bills: 'BUF', Broncos: 'DEN', Browns: 'CLE',
+  Buccaneers: 'TB', Cardinals: 'ARI', Chargers: 'LAC', Chiefs: 'KC', Colts: 'IND', Commanders: 'WSH',
+  Cowboys: 'DAL', Dolphins: 'MIA', Eagles: 'PHI', Falcons: 'ATL', Giants: 'NYG', Jaguars: 'JAX',
+  Jets: 'NYJ', Lions: 'DET', Packers: 'GB', Panthers: 'CAR', Patriots: 'NE', Raiders: 'LV',
+  Rams: 'LAR', Ravens: 'BAL', Saints: 'NO', Seahawks: 'SEA', Steelers: 'PIT', Texans: 'HOU',
+  Titans: 'TEN', Vikings: 'MIN',
+};
+let lastAutoFetchAt = 0;
+const AUTO_FETCH_MIN_MS = 10 * 60 * 1000;
+
+function etDateOf(kickoff) {
+  // Kickoff strings carry an ET offset (e.g. 2026-10-25T09:30:00-04:00),
+  // so the date part is already the ET date ESPN lists the game under.
+  return String(kickoff).slice(0, 10).replace(/-/g, '');
+}
+
+async function maybeAutoFetchResults(week) {
+  try {
+    const undecided = db.prepare('SELECT * FROM games WHERE week_id = ? AND winner IS NULL').all(week.id);
+    if (!undecided.length) return;
+    const now = Date.now();
+    if (now - lastAutoFetchAt < AUTO_FETCH_MIN_MS) return;
+    lastAutoFetchAt = now;
+    // Distinct ET dates of undecided games, so each day's scoreboard is
+    // fetched once per cycle.
+    const dates = [...new Set(undecided.map((g) => etDateOf(g.kickoff)))];
+    const eventsByPair = new Map();
+    for (const d of dates) {
+      const res = await fetch(ESPN_BASE + '?dates=' + d, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) throw new Error('ESPN scoreboard HTTP ' + res.status);
+      const data = await res.json();
+      for (const ev of (data.events || [])) {
+        const comp = ev.competitions && ev.competitions[0];
+        if (!comp) continue;
+        const state = comp.status && comp.status.type && comp.status.type.state;
+        if (state !== 'post') continue; // only final games
+        const teams = {};
+        for (const c of (comp.competitors || [])) {
+          const abbr = c.team && c.team.abbreviation;
+          if (abbr) teams[c.homeAway] = { abbr: String(abbr).toUpperCase(), score: c.score };
+        }
+        if (!teams.away || !teams.home) continue;
+        if (teams.away.score == null || teams.home.score == null) continue;
+        eventsByPair.set(teams.away.abbr + '@' + teams.home.abbr, teams);
+      }
+    }
+    const setWinner = db.prepare('UPDATE games SET winner = ? WHERE id = ? AND winner IS NULL');
+    let filled = 0;
+    for (const g of undecided) {
+      const key = (ESPN_ABBR[g.away_team] || '') + '@' + (ESPN_ABBR[g.home_team] || '');
+      const ev = eventsByPair.get(key);
+      if (!ev) continue;
+      const awayScore = Number(ev.away.score);
+      const homeScore = Number(ev.home.score);
+      if (Number.isNaN(awayScore) || Number.isNaN(homeScore)) continue;
+      if (awayScore === homeScore) continue; // a tie has no winner; leave it for the admin
+      const winner = awayScore > homeScore ? g.away_team : g.home_team;
+      if (setWinner.run(winner, g.id).changes) filled++;
+    }
+    if (filled) console.log('[results] auto-filled ' + filled + ' winner(s) for week ' + week.week_number);
+  } catch (e) {
+    console.log('[results] auto-fetch skipped: ' + (e && e.message ? e.message : e));
+  }
+}
+
 // Pool view data shared by every logged-in player.
 function poolView(week) {
   const games = db.prepare('SELECT * FROM games WHERE week_id = ? ORDER BY kickoff, id').all(week.id);
@@ -440,7 +521,9 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && pathName === '/api/pool') {
     const user = requireUser(req, res);
     if (!user) return;
-    return sendJson(res, 200, poolView(currentWeek()));
+    const week = currentWeek();
+    await maybeAutoFetchResults(week);
+    return sendJson(res, 200, poolView(week));
   }
 
   if (req.method === 'POST' && pathName === '/api/participation') {
@@ -498,6 +581,7 @@ async function handleApi(req, res, url) {
     const user = requireUser(req, res);
     if (!user) return;
     const week = currentWeek();
+    await maybeAutoFetchResults(week);
     const games = db.prepare('SELECT id, winner FROM games WHERE week_id = ?').all(week.id);
     const decided = games.filter((g) => g.winner);
     const users = db.prepare('SELECT id, username, name FROM users WHERE is_admin = 0 ORDER BY username').all();
