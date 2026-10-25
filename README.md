@@ -57,6 +57,26 @@ No password is hardcoded anywhere in this project. Players register their
 own username + password from the sign-in screen (passwords are hashed
 with scrypt; the `admin` username is reserved).
 
+## Registration email alerts (optional)
+
+When these environment variables are set, every new player registration
+sends an email to the admin with the player's name and username:
+
+- `SMTP_USER` — the Gmail address sending the mail
+- `SMTP_PASS` — a Gmail **app password** (see below)
+- `NOTIFY_EMAIL` — where alerts go (defaults to `SMTP_USER`)
+
+If they are not set, registration still works — alerts are just skipped.
+A failed send never blocks registration; it is only logged.
+
+**Gmail app password (do this in your Google account, not in the app):**
+1. Google Account → Security → turn on 2-Step Verification (app
+   passwords require it).
+2. Security → App passwords → create one (name it e.g. "Render").
+3. Paste that 16-character password into Render as the `SMTP_PASS`
+   environment variable — never into the repo, never into chat, never
+   into an email. If it ever leaks, revoke it in Google and make a new one.
+
 ## Deploy to get a public shareable link
 
 Any Node host works. Two simple options:
@@ -92,8 +112,9 @@ Thu Oct 22 at 5:00 PM CT (extended one time from noon).
 
 **Mini Test — Oct 25–26** (13 games, Sun Oct 25 – Mon Oct 26, 2026:
 the Sunday and Monday games from Week 7's slate, no Thursday game).
-Picks lock Sun Oct 25 at 8:00 AM CT, 30 minutes before the first
-kickoff (Steelers at Saints, Paris). Full sheet = 13 picks = $6.50
+Picks lock Sun Oct 25 at 10:00 AM CT. Note: the first game
+(Steelers at Saints, Paris, 8:30 AM CT kickoff) is already underway
+by then. Full sheet = 13 picks = $6.50
 at $0.50 per pick.
 
 Weeks can carry a `label` and `note`, shown in place of "Week N" and
@@ -110,6 +131,29 @@ current automatically. Admins enter game winners after
 games finish via Admin → Game results, and standings/pot splits update
 from those results.
 
+## What's new (Oct 23, 2026)
+
+- **Team season records on the pick sheet.** Each team's current
+  W-L-T record shows under its name (e.g. Steelers 4-2-0). Records
+  live in a `team_records` table, seeded once from the standings as of
+  Oct 23, 2026 (Sky Sports NFL standings). They do NOT auto-update
+  from game results — the admin edits them in Admin → Team records
+  (`GET`/`POST /api/admin/records`, admin-only). Seeding uses
+  `INSERT OR IGNORE`, so admin edits survive restarts.
+- **Real names at registration.** Registration now requires a full
+  name alongside username and password. Names show next to usernames
+  in the pool view, standings, and admin player lists. Accounts
+  created before names existed get a one-time prompt after sign-in
+  asking them to add their name (`POST /api/me/name`). The `users`
+  table gains a `name` column via a startup migration, so old
+  databases keep working.
+- **Redesigned front page.** The sign-in view is now a hero + "How it
+  works" instructions: what the pool is, how to register, mark Playing
+  or Not participating, pick winners, the current week's lock time,
+  $0.50/pick cost, settle outside the app, ties split the pot. The
+  header, lock time, and cost fill in from `GET /api/public-info`
+  (no sign-in needed); static fallback text covers the mini test.
+
 ## Project layout
 
 - `server.js` — HTTP API + SQLite schema, seeding, auth, lock enforcement
@@ -117,3 +161,5 @@ from those results.
 - `public/styles.css` — styling (dark, mobile-friendly)
 - `public/app.js` — frontend logic
 - `pickem.db` — created on first run (not committed; one shared database)
+
+Disclaimer: public/disclaimer.html states the pool terms (tracking only, no liability, players settle outside the app), linked from the footer and the How it works section.

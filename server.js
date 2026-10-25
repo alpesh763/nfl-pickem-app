@@ -1,5 +1,6 @@
 // NFL Weekly Picks — real multi-player pool app.
-// Zero-dependency Node.js server (built-in http + node:sqlite + crypto).
+// Node.js server (built-in http + node:sqlite + crypto, plus nodemailer
+// for optional registration email alerts).
 // One shared SQLite database, so every player sees the same pool state
 // and everything flows back to the admin.
 //
@@ -9,7 +10,11 @@
 //
 // Run:  node server.js            (defaults: PORT=3000, data in ./pickem.db)
 // Env:  PORT, DB_PATH, ADMIN_PASSWORD (sets the admin password on first
-//       run if the admin account has no password yet).
+//       run if the admin account has no password yet),
+//       SMTP_USER, SMTP_PASS, NOTIFY_EMAIL (registration email alerts;
+//       SMTP_PASS is a Gmail app password, never a real password, and
+//       must only ever live in the host's environment variables —
+//       never in the repo, never in chat).
 
 'use strict';
 
@@ -25,6 +30,32 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 
 const db = new DatabaseSync(DB_PATH);
 
+// ------------------------------------------------------- registration email
+// Optional: when SMTP_USER + SMTP_PASS are set, every new player
+// registration emails NOTIFY_EMAIL (defaults to SMTP_USER). Sending never
+// blocks registration — failures are only logged.
+const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL || process.env.SMTP_USER || '';
+async function notifyRegistration(name, username) {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS || !NOTIFY_EMAIL) return;
+  try {
+    const nodemailer = require('nodemailer');
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com', port: 465, secure: true,
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    });
+    const groupName = getSetting('group_name') || 'NFL Weekly Picks';
+    await transporter.sendMail({
+      from: process.env.SMTP_USER,
+      to: NOTIFY_EMAIL,
+      subject: `New player registered: ${name} (${username})`,
+      text: `${name} (${username}) just registered for ${groupName}.\n\nTime: ${new Date().toISOString()}\n\nAutomatic notification from your NFL Weekly Picks app.`,
+    });
+    console.log(`Registration email sent for ${username}`);
+  } catch (e) {
+    console.error('Registration email failed:', e.message);
+  }
+}
+
 // ---------------------------------------------------------------- schema
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -32,6 +63,7 @@ db.exec(`
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT,
     password_salt TEXT,
+    name TEXT,
     is_admin INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -76,6 +108,12 @@ db.exec(`
     paid INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, week_id)
   );
+  CREATE TABLE IF NOT EXISTS team_records (
+    team TEXT PRIMARY KEY,
+    wins INTEGER NOT NULL DEFAULT 0,
+    losses INTEGER NOT NULL DEFAULT 0,
+    ties INTEGER NOT NULL DEFAULT 0
+  );
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -86,6 +124,12 @@ db.exec(`
 for (const col of ['label', 'note']) {
   const cols = db.prepare('PRAGMA table_info(weeks)').all().map((r) => r.name);
   if (!cols.includes(col)) db.exec(`ALTER TABLE weeks ADD COLUMN ${col} TEXT`);
+}
+
+// Users created before names existed get the column added on startup.
+{
+  const cols = db.prepare('PRAGMA table_info(users)').all().map((r) => r.name);
+  if (!cols.includes('name')) db.exec('ALTER TABLE users ADD COLUMN name TEXT');
 }
 
 // ------------------------------------------------------------------ seed
@@ -123,8 +167,9 @@ function seed() {
     }
   }
   // Mini test week: Sunday + Monday games only (Oct 25-26), so the app
-  // can be tested live before full Week 8. Locks Sun Oct 25 at 8:00 AM
-  // Central, 30 minutes before the first kickoff (Steelers-Saints, Paris).
+  // can be tested live before full Week 8. Locks Sun Oct 25 at 10:00 AM
+  // Central. Note: the first game (Steelers-Saints, Paris, 8:30 AM
+  // Central kickoff) is already underway by then.
   // It is week_number 8 with a label so it never displays as "Week 8";
   // full Week 8 is added later as a higher week_number labeled "Week 8".
   const MINI_GAMES = [
@@ -145,7 +190,7 @@ function seed() {
   const mini = db.prepare('SELECT id FROM weeks WHERE season = 2026 AND week_number = 8').get();
   if (!mini) {
     const w = db.prepare(
-      "INSERT INTO weeks (season, week_number, open_at, lock_at, label, note) VALUES (2026, 8, '2026-10-22T23:00:00Z', '2026-10-25T13:00:00Z', 'Mini Test — Oct 25–26', 'Mini test week — Sunday and Monday games only.')"
+      "INSERT INTO weeks (season, week_number, open_at, lock_at, label, note) VALUES (2026, 8, '2026-10-22T23:00:00Z', '2026-10-25T15:00:00Z', 'Mini Test — Oct 25–26', 'Mini test week — Sunday and Monday games only.')"
     ).run();
     const ins = db.prepare(
       'INSERT INTO games (week_id, away_team, home_team, kickoff, kickoff_label) VALUES (?, ?, ?, ?, ?)'
@@ -161,6 +206,42 @@ function seed() {
   for (const [key, value] of [['group_name', ''], ['per_pick_amount', '0.50']]) {
     db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run(key, value);
   }
+  // Team season records (W-L-T) as of Oct 23, 2026, from Sky Sports'
+  // NFL standings page (Fri Oct 23, 2026). INSERT OR IGNORE so records
+  // the admin edits in the panel survive restarts and redeploys.
+  // Records do NOT auto-update from game results; the admin edits them.
+  const TEAM_RECORDS = [
+    ['Patriots', 4, 3, 0],
+    ['Bears', 5, 2, 0],
+    ['Steelers', 4, 2, 0],
+    ['Saints', 2, 4, 0],
+    ['Bengals', 3, 2, 0],
+    ['Ravens', 4, 2, 0],
+    ['Browns', 4, 2, 0],
+    ['Titans', 1, 5, 0],
+    ['Colts', 2, 4, 0],
+    ['Vikings', 5, 0, 0],
+    ['Dolphins', 0, 5, 0],
+    ['Jets', 2, 4, 0],
+    ['Giants', 3, 2, 1],
+    ['Texans', 2, 4, 0],
+    ['49ers', 6, 0, 0],
+    ['Falcons', 2, 4, 0],
+    ['Buccaneers', 1, 5, 0],
+    ['Panthers', 3, 2, 0],
+    ['Broncos', 4, 2, 0],
+    ['Cardinals', 2, 4, 0],
+    ['Packers', 3, 2, 0],
+    ['Lions', 3, 2, 0],
+    ['Rams', 2, 4, 0],
+    ['Raiders', 3, 3, 0],
+    ['Chiefs', 5, 0, 0],
+    ['Seahawks', 3, 3, 0],
+    ['Cowboys', 2, 4, 0],
+    ['Eagles', 2, 4, 0],
+  ];
+  const recIns = db.prepare('INSERT OR IGNORE INTO team_records (team, wins, losses, ties) VALUES (?, ?, ?, ?)');
+  for (const [team, w, l, t] of TEAM_RECORDS) recIns.run(team, w, l, t);
 }
 seed();
 
@@ -198,7 +279,7 @@ function getUserFromRequest(req) {
   const token = decodeURIComponent(cookie.slice('session='.length));
   const sess = db.prepare('SELECT user_id, expires_at FROM sessions WHERE token = ?').get(token);
   if (!sess || new Date(sess.expires_at) < new Date()) return null;
-  return db.prepare('SELECT id, username, is_admin FROM users WHERE id = ?').get(sess.user_id) || null;
+  return db.prepare('SELECT id, username, name, is_admin FROM users WHERE id = ?').get(sess.user_id) || null;
 }
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -236,7 +317,9 @@ function weekStatus(week) {
 // Pool view data shared by every logged-in player.
 function poolView(week) {
   const games = db.prepare('SELECT * FROM games WHERE week_id = ? ORDER BY kickoff, id').all(week.id);
-  const users = db.prepare('SELECT id, username, is_admin FROM users ORDER BY username').all();
+  const users = db.prepare('SELECT id, username, name, is_admin FROM users ORDER BY username').all();
+  const recordRows = db.prepare('SELECT team, wins, losses, ties FROM team_records').all();
+  const recByTeam = new Map(recordRows.map((r) => [r.team, `${r.wins}-${r.losses}-${r.ties}`]));
   const partRows = db.prepare('SELECT user_id, status FROM participation WHERE week_id = ?').all(week.id);
   const partByUser = new Map(partRows.map((r) => [r.user_id, r.status]));
   const pickCounts = new Map(
@@ -246,6 +329,7 @@ function poolView(week) {
   const players = users.filter((u) => !u.is_admin).map((u) => ({
     id: u.id,
     username: u.username,
+    name: u.name || null,
     status: partByUser.get(u.id) || 'no_response',
     pickCount: pickCounts.get(u.id) || 0,
   }));
@@ -253,7 +337,7 @@ function poolView(week) {
     week: { season: week.season, week_number: week.week_number, label: week.label || null, note: week.note || null, open_at: week.open_at, lock_at: week.lock_at, status: weekStatus(week) },
     groupName: getSetting('group_name') || '',
     perPickAmount: Number(getSetting('per_pick_amount') || '0.50'),
-    games: games.map((g) => ({ id: g.id, away: g.away_team, home: g.home_team, kickoffLabel: g.kickoff_label, winner: g.winner })),
+    games: games.map((g) => ({ id: g.id, away: g.away_team, home: g.home_team, kickoffLabel: g.kickoff_label, winner: g.winner, awayRecord: recByTeam.get(g.away_team) || null, homeRecord: recByTeam.get(g.home_team) || null })),
     playing: players.filter((p) => p.status === 'playing'),
     notParticipating: players.filter((p) => p.status === 'not_participating'),
     noResponse: players.filter((p) => p.status === 'no_response'),
@@ -282,17 +366,19 @@ async function handleApi(req, res, url) {
   if (req.method === 'POST' && pathName === '/api/register') {
     const body = await readJson(req);
     const username = (body.username || '').trim();
-    if (!username || !body.password || body.password.length < 4) {
-      return sendJson(res, 400, { error: 'Username and a password of at least 4 characters are required' });
+    const name = (body.name || '').trim();
+    if (!username || !name || !body.password || body.password.length < 4) {
+      return sendJson(res, 400, { error: 'Full name, username, and a password of at least 4 characters are required' });
     }
     if (username.toLowerCase() === 'admin') return sendJson(res, 400, { error: 'That username is reserved' });
     const salt = crypto.randomBytes(16).toString('hex');
     try {
-      db.prepare('INSERT INTO users (username, password_hash, password_salt) VALUES (?, ?, ?)')
-        .run(username, hashPassword(body.password, salt), salt);
+      db.prepare('INSERT INTO users (username, name, password_hash, password_salt) VALUES (?, ?, ?, ?)')
+        .run(username, name.slice(0, 80), hashPassword(body.password, salt), salt);
     } catch {
       return sendJson(res, 409, { error: 'Username already taken' });
     }
+    notifyRegistration(name.slice(0, 80), username);
     return sendJson(res, 201, { ok: true });
   }
 
@@ -306,7 +392,7 @@ async function handleApi(req, res, url) {
     const expires = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
     db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, user.id, expires);
     res.setHeader('Set-Cookie', `session=${token}; HttpOnly; Path=/; Max-Age=${30 * 24 * 3600}; SameSite=Lax`);
-    return sendJson(res, 200, { ok: true, user: { id: user.id, username: user.username, isAdmin: !!user.is_admin } });
+    return sendJson(res, 200, { ok: true, user: { id: user.id, username: user.username, name: user.name || null, isAdmin: !!user.is_admin } });
   }
 
   if (req.method === 'POST' && pathName === '/api/logout') {
@@ -322,7 +408,33 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && pathName === '/api/me') {
     const user = requireUser(req, res);
     if (!user) return;
-    return sendJson(res, 200, { user: { id: user.id, username: user.username, isAdmin: !!user.is_admin } });
+    return sendJson(res, 200, { user: { id: user.id, username: user.username, name: user.name || null, isAdmin: !!user.is_admin } });
+  }
+
+  // One-time name prompt for accounts created before names existed.
+  if (req.method === 'POST' && pathName === '/api/me/name') {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const body = await readJson(req);
+    const name = (body.name || '').trim();
+    if (!name) return sendJson(res, 400, { error: 'Name is required' });
+    db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name.slice(0, 80), user.id);
+    return sendJson(res, 200, { ok: true, name: name.slice(0, 80) });
+  }
+
+  // Public landing-page info: no sign-in needed, so the front page can
+  // show the group name, current week, lock time, and cost before login.
+  if (req.method === 'GET' && pathName === '/api/public-info') {
+    const week = currentWeek();
+    const gameCount = db.prepare('SELECT COUNT(*) AS n FROM games WHERE week_id = ?').get(week.id).n;
+    const perPick = Number(getSetting('per_pick_amount') || '0.50');
+    return sendJson(res, 200, {
+      groupName: getSetting('group_name') || '',
+      perPickAmount: perPick,
+      gameCount,
+      fullSheetAmount: +(perPick * gameCount).toFixed(2),
+      week: { season: week.season, week_number: week.week_number, label: week.label || null, note: week.note || null, open_at: week.open_at, lock_at: week.lock_at, status: weekStatus(week) },
+    });
   }
 
   if (req.method === 'GET' && pathName === '/api/pool') {
@@ -388,7 +500,7 @@ async function handleApi(req, res, url) {
     const week = currentWeek();
     const games = db.prepare('SELECT id, winner FROM games WHERE week_id = ?').all(week.id);
     const decided = games.filter((g) => g.winner);
-    const users = db.prepare('SELECT id, username FROM users WHERE is_admin = 0 ORDER BY username').all();
+    const users = db.prepare('SELECT id, username, name FROM users WHERE is_admin = 0 ORDER BY username').all();
     const wager = Number(getSetting('per_pick_amount') || '0.50');
     const rows = users.map((u) => {
       const picks = db.prepare('SELECT game_id, team FROM picks WHERE user_id = ?').all(u.id);
@@ -397,7 +509,7 @@ async function handleApi(req, res, url) {
         return g && g.winner && g.winner === p.team;
       }).length;
       const paidRow = db.prepare('SELECT paid FROM payments WHERE user_id = ? AND week_id = ?').get(u.id, week.id);
-      return { id: u.id, username: u.username, wins, pickCount: picks.filter((p) => games.some((g) => g.id === p.game_id)).length, owed: +(picks.filter((p) => games.some((g) => g.id === p.game_id)).length * wager).toFixed(2), paid: !!(paidRow && paidRow.paid) };
+      return { id: u.id, username: u.username, name: u.name || null, wins, pickCount: picks.filter((p) => games.some((g) => g.id === p.game_id)).length, owed: +(picks.filter((p) => games.some((g) => g.id === p.game_id)).length * wager).toFixed(2), paid: !!(paidRow && paidRow.paid) };
     });
     rows.sort((a, b) => b.wins - a.wins || a.username.localeCompare(b.username));
     const topWins = rows.length && decided.length ? Math.max(...rows.map((r) => r.wins)) : null;
@@ -417,7 +529,7 @@ async function handleApi(req, res, url) {
     if (!admin) return;
     const week = currentWeek();
     const view = poolView(week);
-    const users = db.prepare('SELECT id, username FROM users WHERE is_admin = 0 ORDER BY username').all();
+    const users = db.prepare('SELECT id, username, name FROM users WHERE is_admin = 0 ORDER BY username').all();
     const wager = Number(getSetting('per_pick_amount') || '0.50');
     const games = db.prepare('SELECT * FROM games WHERE week_id = ? ORDER BY kickoff, id').all(week.id);
     const players = users.map((u) => {
@@ -426,7 +538,7 @@ async function handleApi(req, res, url) {
         .filter((p) => games.some((g) => g.id === p.game_id));
       const paidRow = db.prepare('SELECT paid FROM payments WHERE user_id = ? AND week_id = ?').get(u.id, week.id);
       return {
-        id: u.id, username: u.username,
+        id: u.id, username: u.username, name: u.name || null,
         status: part ? part.status : 'no_response',
         picks: Object.fromEntries(picks.map((p) => [p.game_id, p.team])),
         pickCount: picks.length,
@@ -466,6 +578,30 @@ async function handleApi(req, res, url) {
     db.prepare(`INSERT INTO payments (user_id, week_id, paid) VALUES (?, ?, ?)
       ON CONFLICT(user_id, week_id) DO UPDATE SET paid = excluded.paid`)
       .run(body.user_id, week.id, body.paid ? 1 : 0);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  // Team season records shown under each team on the pick sheet.
+  // Admin-only. Records do NOT auto-update from results; edit here.
+  if (req.method === 'GET' && pathName === '/api/admin/records') {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
+    const rows = db.prepare('SELECT team, wins, losses, ties FROM team_records ORDER BY team').all();
+    return sendJson(res, 200, { records: rows });
+  }
+
+  if (req.method === 'POST' && pathName === '/api/admin/records') {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
+    const body = await readJson(req);
+    const team = (body.team || '').trim();
+    const wins = Number(body.wins), losses = Number(body.losses), ties = Number(body.ties);
+    if (!team || ![wins, losses, ties].every((n) => Number.isInteger(n) && n >= 0 && n <= 30)) {
+      return sendJson(res, 400, { error: 'Team and whole-number records (0-30) are required' });
+    }
+    db.prepare(`INSERT INTO team_records (team, wins, losses, ties) VALUES (?, ?, ?, ?)
+      ON CONFLICT(team) DO UPDATE SET wins = excluded.wins, losses = excluded.losses, ties = excluded.ties`)
+      .run(team.slice(0, 40), wins, losses, ties);
     return sendJson(res, 200, { ok: true });
   }
 
@@ -511,6 +647,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`NFL Weekly Picks running at http://localhost:${PORT}`);
   console.log(`Database: ${DB_PATH}`);
+  console.log(`Registration emails: ${process.env.SMTP_USER && process.env.SMTP_PASS ? `enabled → ${NOTIFY_EMAIL}` : 'disabled (set SMTP_USER and SMTP_PASS to enable)'}`);
   const admin = db.prepare("SELECT password_hash FROM users WHERE username = 'admin'").get();
   if (!admin || !admin.password_hash) {
     console.log('Admin account "admin" has no password yet. Set it with ADMIN_PASSWORD on first run, or POST /api/admin/setup once.');
