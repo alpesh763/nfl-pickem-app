@@ -51,8 +51,10 @@
           <button type="button" id="toRegisterBtn">Create account</button>
         </div>
       </form>
+      <p class="muted"><a href="forgot.html">Forgot your username or password?</a> We'll email you a reset link.</p>
       <form id="registerForm" method="post" class="hidden">
         <label>Full name <input id="regName" autocomplete="name" placeholder="e.g. Alex Johnson"></label>
+        <label>Email <input id="regEmail" type="email" autocomplete="email" placeholder="you@example.com"></label>
         <label>Username <input id="regUsername" autocomplete="username"></label>
         <label>Password <span class="pwWrap"><input id="regPassword" type="password" autocomplete="new-password"><button type="button" class="pwToggle" data-target="regPassword" aria-label="Show password">👁</button></span></label>
         <label>Confirm password <span class="pwWrap"><input id="regConfirm" type="password" autocomplete="new-password"><button type="button" class="pwToggle" data-target="regConfirm" aria-label="Show password">👁</button></span></label>
@@ -80,6 +82,13 @@
       <label>Full name <input id="namePromptInput" autocomplete="name"></label>
       <button id="saveNameBtn" class="primary">Save my name</button>
       <p id="namePromptMsg" class="muted"></p>
+    </div>
+    <div id="emailPrompt" class="card accent hidden">
+      <h3>One quick thing — add your email</h3>
+      <p class="muted">We now record an email so you can get a password reset link if you forget your username or password. Add it once and you are set.</p>
+      <label>Email <input id="emailPromptInput" type="email" autocomplete="email"></label>
+      <button id="saveEmailBtn" class="primary">Save my email</button>
+      <p id="emailPromptMsg" class="muted"></p>
     </div>
     <nav class="tabs">
       <button data-tab="pool" class="tab active">Pool</button>
@@ -153,7 +162,7 @@
         <h2>Admin — Payments</h2>
         <p id="adminTotals" class="muted"></p>
         <table id="paymentsTable">
-          <thead><tr><th>Player</th><th>Status</th><th>Picks</th><th>Owed</th><th>Paid</th></tr></thead>
+          <thead><tr><th>Player</th><th>Email</th><th>Status</th><th>Picks</th><th>Owed</th><th>Paid</th><th>Remove</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -167,6 +176,12 @@
         <h2>Admin — Game results</h2>
         <p class="muted">Enter winners after games finish; standings update from these.</p>
         <div id="resultsList"></div>
+      </div>
+      <div class="card">
+        <h2>Admin — Next week</h2>
+        <p class="muted">The next week normally seeds itself from the NFL schedule after the current week ends and its Tuesday arrives. Use this only if that hasn't happened.</p>
+        <button id="seedNextWeekBtn">Seed next week from NFL schedule</button>
+        <p id="seedNextWeekMsg" class="muted"></p>
       </div>
       <div class="card">
         <h2>Admin — All picks</h2>

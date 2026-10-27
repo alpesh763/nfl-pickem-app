@@ -58,6 +58,8 @@ async function refreshMe() {
     $('adminTabBtn').classList.toggle('hidden', !me.isAdmin);
     // One-time prompt for accounts created before names existed.
     $('namePrompt').classList.toggle('hidden', !(!me.isAdmin && !me.name));
+    // One-time prompt for accounts created before emails were recorded.
+    $('emailPrompt').classList.toggle('hidden', !(!me.isAdmin && !me.email));
     show('appView');
     return true;
   } catch {
@@ -158,12 +160,27 @@ async function loadAdmin() {
   $('wagerInput').value = data.perPickAmount;
   $('adminTotals').textContent = fmtMoney(data.collected) + ' collected · ' + fmtMoney(data.stillOwed) + ' still owed · ' + fmtMoney(data.owedTotal) + ' total owed.';
   document.querySelector('#paymentsTable tbody').innerHTML = data.players.map((p) =>
-    '<tr><td>' + displayName(p) + '</td><td>' + p.status.replace('_', ' ') + '</td><td>' + p.pickCount + '</td><td>' + fmtMoney(p.owed) + '</td>' +
-    '<td><input type="checkbox" data-paid-user="' + p.id + '"' + (p.paid ? ' checked' : '') + '> Paid</td></tr>').join('');
+    '<tr><td>' + displayName(p) + '</td><td>' + (p.email || '') + '</td><td>' + p.status.replace('_', ' ') + '</td><td>' + p.pickCount + '</td><td>' + fmtMoney(p.owed) + '</td>' +
+    '<td><input type="checkbox" data-paid-user="' + p.id + '"' + (p.paid ? ' checked' : '') + '> Paid</td>' +
+    '<td><button type="button" data-remove-user="' + p.id + '">Remove</button></td></tr>').join('');
   document.querySelectorAll('[data-paid-user]').forEach((cb) => {
     cb.addEventListener('change', async () => {
       await api('/api/admin/payments', 'POST', { user_id: Number(cb.dataset.paidUser), paid: cb.checked });
       loadAdmin();
+    });
+  });
+  document.querySelectorAll('[data-remove-user]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = Number(btn.dataset.removeUser);
+      const player = data.players.find((x) => x.id === id);
+      if (!player) return;
+      if (!confirm('Remove ' + displayName(player) + '? This permanently deletes their account, picks, and payment record.')) return;
+      try {
+        await api('/api/admin/remove-player', 'POST', { user_id: id });
+        loadAdmin();
+      } catch (e) {
+        alert(e.message);
+      }
     });
   });
   $('resultsList').innerHTML = data.games.map((g) =>
@@ -265,8 +282,13 @@ $('registerForm').addEventListener('submit', async (e) => {
     $('authError').classList.remove('hidden');
     return;
   }
+  if (!$('regEmail').value.trim()) {
+    $('authError').textContent = 'Email is required so a password reset link can be sent.';
+    $('authError').classList.remove('hidden');
+    return;
+  }
   try {
-    await api('/api/register', 'POST', { name: $('regName').value, username: $('regUsername').value, password: $('regPassword').value });
+    await api('/api/register', 'POST', { name: $('regName').value, username: $('regUsername').value, email: $('regEmail').value, password: $('regPassword').value });
     $('authMsg').textContent = 'Account created. Sign in now.';
     $('authMsg').classList.remove('hidden');
     $('siUsername').value = $('regUsername').value;
@@ -291,6 +313,36 @@ $('saveNameBtn').addEventListener('click', async () => {
     loadPool();
   } catch (e) {
     $('namePromptMsg').textContent = e.message;
+  }
+});
+
+$('saveEmailBtn').addEventListener('click', async () => {
+  const email = $('emailPromptInput').value.trim();
+  if (!email) {
+    $('emailPromptMsg').textContent = 'Please enter your email.';
+    return;
+  }
+  try {
+    await api('/api/me/email', 'POST', { email });
+    me.email = email;
+    $('emailPrompt').classList.add('hidden');
+  } catch (e) {
+    $('emailPromptMsg').textContent = e.message;
+  }
+});
+
+// Admin fallback for automatic seeding. Attached once here (not inside
+// loadAdmin) because this button is static HTML, not re-rendered.
+$('seedNextWeekBtn').addEventListener('click', async () => {
+  $('seedNextWeekMsg').textContent = 'Seeding…';
+  try {
+    const r = await api('/api/admin/seed-next-week', 'POST', {});
+    $('seedNextWeekMsg').textContent = r.seeded
+      ? ('Seeded ' + r.label + ' (' + r.gameCount + ' games).')
+      : ('Not seeded: ' + (r.reason || 'unknown') + '.');
+    loadAdmin();
+  } catch (e) {
+    $('seedNextWeekMsg').textContent = e.message;
   }
 });
 

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forgot password — NFL Weekly Picks</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main>
+  <section class="card">
+    <h2>Forgot your username or password?</h2>
+    <p class="muted">Enter the email you registered with. If an account exists for it, we'll send a reset link (good for 1 hour) that also reminds you of your username.</p>
+    <form id="forgotForm" method="post">
+      <label>Email <input id="forgotEmail" type="email" autocomplete="email" placeholder="you@example.com"></label>
+      <div class="row">
+        <button type="submit" class="primary">Send reset link</button>
+        <a href="index.html"><button type="button">Back to sign in</button></a>
+      </div>
+    </form>
+    <p id="forgotMsg" class="muted hidden"></p>
+    <p id="forgotError" class="error hidden"></p>
+  </section>
+</main>
+<script>
+document.getElementById('forgotForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('forgotMsg');
+  const err = document.getElementById('forgotError');
+  msg.classList.add('hidden'); err.classList.add('hidden');
+  const email = document.getElementById('forgotEmail').value.trim();
+  if (!email) { err.textContent = 'Enter your email.'; err.classList.remove('hidden'); return; }
+  try {
+    const res = await fetch('/api/forgot-password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Could not send the reset link.');
+    msg.textContent = 'If an account exists for that email, a reset link has been sent. Check your inbox (and spam).';
+    msg.classList.remove('hidden');
+  } catch (e2) {
+    err.textContent = e2.message;
+    err.classList.remove('hidden');
+  }
+});
+</script>
+</body>
+</html>
