@@ -56,6 +56,18 @@ async function notifyRegistration(name, username) {
   }
 }
 
+// Generic outbound mail (password resets). Throws on failure so the
+// caller can decide what to tell the user. Requires SMTP_USER +
+// SMTP_PASS, same Gmail app-password setup as registration alerts.
+async function sendMail(to, subject, text) {
+  const nodemailer = require('nodemailer');
+  const transporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com', port: 465, secure: true,
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  });
+  await transporter.sendMail({ from: process.env.SMTP_USER, to, subject, text });
+}
+
 // ---------------------------------------------------------------- schema
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -154,10 +166,34 @@ const WEEK7_GAMES = [
 ];
 
 function seed() {
+  // Migration: record each player's email (for password resets) and hold
+  // reset tokens. Runs on every start; safe on databases created before
+  // these existed. A unique index on a nullable column still allows
+  // multiple NULLs (older accounts without an email).
+  const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  if (!userCols.includes('email')) db.exec('ALTER TABLE users ADD COLUMN email TEXT');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)');
+  db.exec(`CREATE TABLE IF NOT EXISTS password_resets (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    expires_at TEXT NOT NULL
+  )`);
+  // Migration: track the NFL week number per week (for automatic seeding).
+  // The app's week_number diverged from the NFL's when the mini test took
+  // week_number 8, so week_number 9 is NFL Week 8, and so on. The mini
+  // test is not an NFL week and keeps nfl_week NULL.
+  const weekCols = db.prepare('PRAGMA table_info(weeks)').all().map((c) => c.name);
+  if (!weekCols.includes('nfl_week')) db.exec('ALTER TABLE weeks ADD COLUMN nfl_week INTEGER');
+  db.prepare('UPDATE weeks SET nfl_week = 7 WHERE season = 2026 AND week_number = 7 AND nfl_week IS NULL').run();
+  // One week_number per season: this is what makes concurrent auto-seed
+  // attempts safe (two loads racing past the early check cannot both
+  // insert; the loser gets a constraint error, not a duplicate week).
+  try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_weeks_season_number ON weeks(season, week_number)'); }
+  catch (e) { console.log('[seed] weeks unique index skipped: ' + (e && e.message ? e.message : e)); }
   const existing = db.prepare('SELECT id FROM weeks WHERE season = 2026 AND week_number = 7').get();
   if (!existing) {
     const w = db.prepare(
-      "INSERT INTO weeks (season, week_number, open_at, lock_at) VALUES (2026, 7, '2026-10-20T05:00:00Z', '2026-10-22T22:00:00Z')"
+      "INSERT INTO weeks (season, week_number, nfl_week, open_at, lock_at) VALUES (2026, 7, 7, '2026-10-20T05:00:00Z', '2026-10-22T22:00:00Z')"
     ).run();
     const ins = db.prepare(
       'INSERT INTO games (week_id, away_team, home_team, kickoff, kickoff_label) VALUES (?, ?, ?, ?, ?)'
@@ -242,6 +278,41 @@ function seed() {
   ];
   const recIns = db.prepare('INSERT OR IGNORE INTO team_records (team, wins, losses, ties) VALUES (?, ?, ?, ?)');
   for (const [team, w, l, t] of TEAM_RECORDS) recIns.run(team, w, l, t);
+
+  // Full Week 8: 14 games, Thu Oct 29–Mon Nov 2, 2026. Added as
+  // week_number 9 (8 is the mini test) with label 'Week 8' so it displays
+  // correctly. INSERT-guarded by week_number so it seeds exactly once.
+  // Only becomes current when deployed after the mini test ends, because
+  // the app treats the highest week_number as current — deploying this
+  // before Monday night's game would hide the mini test pool.
+  const WEEK8_GAMES = [
+    ['Panthers', 'Packers', '2026-10-29T20:15:00-04:00', 'Thu Oct 29, 8:15 PM ET'],
+    ['Ravens', 'Bills', '2026-11-01T13:00:00-05:00', 'Sun Nov 1, 1:00 PM ET'],
+    ['Titans', 'Bengals', '2026-11-01T13:00:00-05:00', 'Sun Nov 1, 1:00 PM ET'],
+    ['Cardinals', 'Cowboys', '2026-11-01T13:00:00-05:00', 'Sun Nov 1, 1:00 PM ET'],
+    ['Vikings', 'Lions', '2026-11-01T13:00:00-05:00', 'Sun Nov 1, 1:00 PM ET'],
+    ['Raiders', 'Jets', '2026-11-01T13:00:00-05:00', 'Sun Nov 1, 1:00 PM ET'],
+    ['Browns', 'Steelers', '2026-11-01T13:00:00-05:00', 'Sun Nov 1, 1:00 PM ET'],
+    ['Falcons', 'Buccaneers', '2026-11-01T13:00:00-05:00', 'Sun Nov 1, 1:00 PM ET'],
+    ['Colts', 'Jaguars', '2026-11-01T13:00:00-05:00', 'Sun Nov 1, 1:00 PM ET'],
+    ['Chargers', 'Rams', '2026-11-01T16:05:00-05:00', 'Sun Nov 1, 4:05 PM ET'],
+    ['Chiefs', 'Broncos', '2026-11-01T16:25:00-05:00', 'Sun Nov 1, 4:25 PM ET'],
+    ['Patriots', 'Dolphins', '2026-11-01T16:25:00-05:00', 'Sun Nov 1, 4:25 PM ET'],
+    ['Eagles', 'Commanders', '2026-11-01T20:20:00-05:00', 'Sun Nov 1, 8:20 PM ET'],
+    ['Bears', 'Seahawks', '2026-11-02T20:15:00-05:00', 'Mon Nov 2, 8:15 PM ET'],
+  ];
+  const w8 = db.prepare('SELECT id FROM weeks WHERE season = 2026 AND week_number = 9').get();
+  if (!w8) {
+    const w = db.prepare(
+      "INSERT INTO weeks (season, week_number, nfl_week, open_at, lock_at, label, note) VALUES (2026, 9, 8, '2026-10-27T05:00:00Z', '2026-10-29T17:00:00Z', 'Week 8', 'Full Week 8 — Thursday through Monday games.')"
+    ).run();
+    const ins = db.prepare(
+      'INSERT INTO games (week_id, away_team, home_team, kickoff, kickoff_label) VALUES (?, ?, ?, ?, ?)'
+    );
+    for (const [away, home, kickoff, label] of WEEK8_GAMES) {
+      ins.run(w.lastInsertRowid, away, home, kickoff, label);
+    }
+  }
 }
 seed();
 
@@ -279,7 +350,7 @@ function getUserFromRequest(req) {
   const token = decodeURIComponent(cookie.slice('session='.length));
   const sess = db.prepare('SELECT user_id, expires_at FROM sessions WHERE token = ?').get(token);
   if (!sess || new Date(sess.expires_at) < new Date()) return null;
-  return db.prepare('SELECT id, username, name, is_admin FROM users WHERE id = ?').get(sess.user_id) || null;
+  return db.prepare('SELECT id, username, name, email, is_admin FROM users WHERE id = ?').get(sess.user_id) || null;
 }
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -395,6 +466,153 @@ async function maybeAutoFetchResults(week) {
   }
 }
 
+// ------------------------------------------------------------------
+// Automatic next-week seeding.
+// After a week ends, the server creates the next week by itself from
+// ESPN's public schedule feed — no upload, no hand-typed games. It runs
+// on pool/standings loads, alongside the results auto-fetch.
+// Safety rules (each one exists because of a real failure mode):
+// - The new week is only INSERTED once its Tuesday open has arrived, so
+//   a Monday-night load can never hide the just-finished week's final
+//   standings behind the new week (there is no past-weeks view).
+// - It only runs when the current week is finished: every game decided,
+//   OR the last kickoff is more than 12 hours old (a tie leaves a winner
+//   NULL forever, so the time fallback covers ties and postponements).
+// - Regular season only (NFL Week 18 is the last auto-seed).
+// - Never duplicates: returns early if the next week already exists.
+// - Any failure is logged and ignored; the admin button retries it.
+const ABBR_TO_TEAM = Object.fromEntries(Object.entries(ESPN_ABBR).map(([name, abbr]) => [abbr, name]));
+let lastAutoSeedAt = 0;
+
+function tzOffsetString(date, timeZone) {
+  // Offset of the zone at this instant, as ±HH:MM. Rebuild the wall-clock
+  // reading as if it were UTC and diff against the real instant.
+  const fmt = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  const parts = fmt.formatToParts(date);
+  const get = (t) => Number(parts.find((p) => p.type === t).value);
+  const asUTC = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
+  const offsetMin = Math.round((asUTC - date.getTime()) / 60000);
+  const sign = offsetMin < 0 ? '-' : '+';
+  const abs = Math.abs(offsetMin);
+  return sign + String(Math.floor(abs / 60)).padStart(2, '0') + ':' + String(abs % 60).padStart(2, '0');
+}
+
+function etKickoff(date) {
+  // Kickoff in the manual seeds' format: ET-offset ISO plus an ET label
+  // (e.g. 2026-11-05T20:15:00-05:00, 'Thu Nov 5, 8:15 PM ET'). The offset
+  // matters: the results auto-fetch slices the date part as the ET date.
+  const fmt12 = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+  const p12 = fmt12.formatToParts(date);
+  const get12 = (t) => p12.find((p) => p.type === t).value;
+  const fmt24 = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+  const p24 = fmt24.formatToParts(date);
+  const get24 = (t) => p24.find((p) => p.type === t).value;
+  const kickoff = `${get24('year')}-${get24('month')}-${get24('day')}T${get24('hour')}:${get24('minute')}:00${tzOffsetString(date, 'America/New_York')}`;
+  const label = `${get12('weekday')} ${get12('month')} ${get12('day')}, ${get12('hour')}:${get12('minute')} ${get12('dayPeriod')} ET`;
+  return { kickoff, label };
+}
+
+function chicagoWallToUTC(year, month, day, hour, minute) {
+  // A Chicago wall-clock reading as a UTC ISO string, correct across
+  // CDT/CST. Two passes: the offset at the first guess is already right
+  // except within an hour of a DST switch, and the second pass fixes
+  // even that.
+  let utcMs = Date.UTC(year, month - 1, day, hour, minute);
+  for (let i = 0; i < 2; i++) {
+    const off = tzOffsetString(new Date(utcMs), 'America/Chicago');
+    const sign = off[0] === '-' ? -1 : 1;
+    const [oh, om] = off.slice(1).split(':').map(Number);
+    utcMs = Date.UTC(year, month - 1, day, hour, minute) - sign * (oh * 60 + om) * 60000;
+  }
+  return new Date(utcMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function weekWindow(firstKickoffMs) {
+  // The pool's week: opens Tuesday, locks Thursday 12pm CT. Derive both
+  // from the first game's ET date: step back to the Thursday of that
+  // NFL week (weeks run Thursday–Monday), then two days further back.
+  const fmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: 'short', day: 'numeric' });
+  const parts = fmt.formatToParts(new Date(firstKickoffMs));
+  const get = (t) => parts.find((p) => p.type === t).value;
+  const months = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
+  let d = new Date(Date.UTC(Number(get('year')), months[get('month')], Number(get('day'))));
+  const backToThu = (d.getUTCDay() + 7 - 4) % 7; // Thursday = 4
+  d = new Date(d.getTime() - backToThu * 86400000);
+  const thursday = d;
+  const tuesday = new Date(d.getTime() - 2 * 86400000);
+  return {
+    open_at: chicagoWallToUTC(tuesday.getUTCFullYear(), tuesday.getUTCMonth() + 1, tuesday.getUTCDate(), 0, 0),
+    lock_at: chicagoWallToUTC(thursday.getUTCFullYear(), thursday.getUTCMonth() + 1, thursday.getUTCDate(), 12, 0),
+  };
+}
+
+async function maybeAutoSeedNextWeek(week, opts = {}) {
+  try {
+    const force = !!opts.force; // admin button: skips the finished-week check only
+    if (week.nfl_week == null) return { ok: false, seeded: false, reason: 'current week has no NFL week number' };
+    const nextNfl = week.nfl_week + 1;
+    if (nextNfl > 18) return { ok: false, seeded: false, reason: 'regular season is over' };
+    const nextApp = db.prepare('SELECT id FROM weeks WHERE season = ? AND week_number = ?').get(week.season, week.week_number + 1);
+    if (nextApp) return { ok: false, seeded: false, reason: 'next week already exists' };
+    const games = db.prepare('SELECT * FROM games WHERE week_id = ? ORDER BY kickoff, id').all(week.id);
+    if (!games.length) return { ok: false, seeded: false, reason: 'current week has no games' };
+    const allDecided = games.every((g) => g.winner);
+    const lastKickoffMs = Math.max(...games.map((g) => new Date(g.kickoff).getTime()));
+    const finaleOver = Date.now() > lastKickoffMs + 12 * 60 * 60 * 1000;
+    if (!force && !allDecided && !finaleOver) return { ok: false, seeded: false, reason: 'current week is not finished' };
+    if (!force) {
+      const now = Date.now();
+      if (now - lastAutoSeedAt < AUTO_FETCH_MIN_MS) return { ok: false, seeded: false, reason: 'throttled' };
+      lastAutoSeedAt = now;
+    }
+    const res = await fetch(ESPN_BASE + '?seasontype=2&week=' + nextNfl, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error('ESPN scoreboard HTTP ' + res.status);
+    const data = await res.json();
+    const byPair = new Map();
+    for (const ev of (data.events || [])) {
+      const comp = ev.competitions && ev.competitions[0];
+      if (!comp || !ev.date) continue;
+      const teams = {};
+      for (const c of (comp.competitors || [])) {
+        const abbr = c.team && c.team.abbreviation ? String(c.team.abbreviation).toUpperCase() : '';
+        if (abbr && ABBR_TO_TEAM[abbr]) teams[c.homeAway] = ABBR_TO_TEAM[abbr];
+      }
+      if (!teams.away || !teams.home) continue;
+      const key = teams.away + '@' + teams.home;
+      if (!byPair.has(key)) byPair.set(key, { away: teams.away, home: teams.home, date: new Date(ev.date) });
+    }
+    if (!byPair.size) return { ok: false, seeded: false, reason: 'no games found for next week' };
+    const list = [...byPair.values()].sort((a, b) => a.date - b.date);
+    const { open_at, lock_at } = weekWindow(list[0].date.getTime());
+    if (Date.now() < Date.parse(open_at)) return { ok: false, seeded: false, reason: 'next week has not opened yet' };
+    const label = 'Week ' + nextNfl;
+    db.exec('BEGIN');
+    try {
+      const w = db.prepare(
+        'INSERT INTO weeks (season, week_number, nfl_week, open_at, lock_at, label, note) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      ).run(week.season, week.week_number + 1, nextNfl, open_at, lock_at, label, 'Auto-seeded from the NFL schedule.');
+      const ins = db.prepare(
+        'INSERT INTO games (week_id, away_team, home_team, kickoff, kickoff_label) VALUES (?, ?, ?, ?, ?)'
+      );
+      for (const g of list) {
+        const k = etKickoff(g.date);
+        ins.run(w.lastInsertRowid, g.away, g.home, k.kickoff, k.label);
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch {}
+      // A concurrent load seeded first: not an error, just already done.
+      if (/UNIQUE constraint/.test(e.message || '')) return { ok: false, seeded: false, reason: 'next week already exists' };
+      throw e;
+    }
+    console.log('[seed] auto-seeded ' + label + ' (' + list.length + ' games)');
+    return { ok: true, seeded: true, label, gameCount: list.length };
+  } catch (e) {
+    console.log('[seed] auto-seed skipped: ' + (e && e.message ? e.message : e));
+    return { ok: false, seeded: false, reason: 'fetch failed' };
+  }
+}
+
 // Pool view data shared by every logged-in player.
 function poolView(week) {
   const games = db.prepare('SELECT * FROM games WHERE week_id = ? ORDER BY kickoff, id').all(week.id);
@@ -448,19 +666,84 @@ async function handleApi(req, res, url) {
     const body = await readJson(req);
     const username = (body.username || '').trim();
     const name = (body.name || '').trim();
+    const email = (body.email || '').trim().toLowerCase();
     if (!username || !name || !body.password || body.password.length < 4) {
       return sendJson(res, 400, { error: 'Full name, username, and a password of at least 4 characters are required' });
+    }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return sendJson(res, 400, { error: 'A valid email is required so a password reset link can be sent' });
     }
     if (username.toLowerCase() === 'admin') return sendJson(res, 400, { error: 'That username is reserved' });
     const salt = crypto.randomBytes(16).toString('hex');
     try {
-      db.prepare('INSERT INTO users (username, name, password_hash, password_salt) VALUES (?, ?, ?, ?)')
-        .run(username, name.slice(0, 80), hashPassword(body.password, salt), salt);
+      db.prepare('INSERT INTO users (username, name, email, password_hash, password_salt) VALUES (?, ?, ?, ?, ?)')
+        .run(username, name.slice(0, 80), email.slice(0, 120), hashPassword(body.password, salt), salt);
     } catch {
+      const clash = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+      if (clash) return sendJson(res, 409, { error: 'That email is already registered' });
       return sendJson(res, 409, { error: 'Username already taken' });
     }
     notifyRegistration(name.slice(0, 80), username);
     return sendJson(res, 201, { ok: true });
+  }
+
+  // Forgot username or password: send a one-hour reset link to the email
+  // on file. Always answers ok (no account enumeration), except when
+  // email sending itself is not configured — that is a global state, not
+  // a hint about the address. The email includes the username and the
+  // reset link, so one flow covers both "forgot username" and "forgot
+  // password". Only the token hash is stored, never the raw token.
+  if (req.method === 'POST' && pathName === '/api/forgot-password') {
+    const body = await readJson(req);
+    const email = (body.email || '').trim().toLowerCase();
+    if (!email) return sendJson(res, 400, { error: 'Email is required' });
+    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+      return sendJson(res, 503, { error: 'Password reset emails are not set up yet — contact the admin' });
+    }
+    const user = db.prepare('SELECT id, username, email FROM users WHERE email = ?').get(email);
+    if (user) {
+      const token = crypto.randomBytes(32).toString('hex');
+      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      db.prepare('INSERT INTO password_resets (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
+        .run(tokenHash, user.id, expiresAt);
+      const host = req.headers.host || '';
+      const proto = host.includes('localhost') || host.includes('127.0.0.1') ? 'http' : 'https';
+      const link = `${proto}://${host}/reset.html?token=${token}`;
+      const groupName = getSetting('group_name') || 'NFL Weekly Picks';
+      try {
+        await sendMail(user.email,
+          `Reset your ${groupName} password`,
+          `Hi ${user.username},\n\nYour username is: ${user.username}\n\nReset your password here (link works for 1 hour):\n${link}\n\nIf you did not ask for this, ignore this email — your password is unchanged.`);
+      } catch (e) {
+        db.prepare('DELETE FROM password_resets WHERE token_hash = ?').run(tokenHash);
+        console.error('Password reset email failed:', e.message);
+        return sendJson(res, 503, { error: 'Could not send the reset email — try again later' });
+      }
+    }
+    return sendJson(res, 200, { ok: true });
+  }
+
+  // Consume a reset link: set a new password, invalidate the token, and
+  // sign out all of the user's sessions.
+  if (req.method === 'POST' && pathName === '/api/reset-password') {
+    const body = await readJson(req);
+    const token = body.token || '';
+    const password = body.password || '';
+    if (!token || !password || password.length < 4) {
+      return sendJson(res, 400, { error: 'A valid reset link and a password of at least 4 characters are required' });
+    }
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const row = db.prepare('SELECT user_id, expires_at FROM password_resets WHERE token_hash = ?').get(tokenHash);
+    if (!row || new Date(row.expires_at) < new Date()) {
+      return sendJson(res, 400, { error: 'This reset link is invalid or has expired' });
+    }
+    const salt = crypto.randomBytes(16).toString('hex');
+    db.prepare('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?')
+      .run(hashPassword(password, salt), salt, row.user_id);
+    db.prepare('DELETE FROM password_resets WHERE token_hash = ?').run(tokenHash);
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(row.user_id);
+    return sendJson(res, 200, { ok: true });
   }
 
   if (req.method === 'POST' && pathName === '/api/login') {
@@ -489,7 +772,7 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && pathName === '/api/me') {
     const user = requireUser(req, res);
     if (!user) return;
-    return sendJson(res, 200, { user: { id: user.id, username: user.username, name: user.name || null, isAdmin: !!user.is_admin } });
+    return sendJson(res, 200, { user: { id: user.id, username: user.username, name: user.name || null, email: user.email || null, isAdmin: !!user.is_admin } });
   }
 
   // One-time name prompt for accounts created before names existed.
@@ -501,6 +784,24 @@ async function handleApi(req, res, url) {
     if (!name) return sendJson(res, 400, { error: 'Name is required' });
     db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name.slice(0, 80), user.id);
     return sendJson(res, 200, { ok: true, name: name.slice(0, 80) });
+  }
+
+  // One-time email prompt for accounts created before emails were
+  // recorded, so older players can use password resets too.
+  if (req.method === 'POST' && pathName === '/api/me/email') {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const body = await readJson(req);
+    const email = (body.email || '').trim().toLowerCase();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return sendJson(res, 400, { error: 'A valid email is required' });
+    }
+    try {
+      db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email.slice(0, 120), user.id);
+    } catch {
+      return sendJson(res, 409, { error: 'That email is already registered' });
+    }
+    return sendJson(res, 200, { ok: true, email: email.slice(0, 120) });
   }
 
   // Public landing-page info: no sign-in needed, so the front page can
@@ -521,8 +822,10 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && pathName === '/api/pool') {
     const user = requireUser(req, res);
     if (!user) return;
-    const week = currentWeek();
+    let week = currentWeek();
     await maybeAutoFetchResults(week);
+    const seeded = await maybeAutoSeedNextWeek(week);
+    if (seeded.seeded) week = currentWeek();
     return sendJson(res, 200, poolView(week));
   }
 
@@ -580,8 +883,10 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && pathName === '/api/standings') {
     const user = requireUser(req, res);
     if (!user) return;
-    const week = currentWeek();
+    let week = currentWeek();
     await maybeAutoFetchResults(week);
+    const seeded = await maybeAutoSeedNextWeek(week);
+    if (seeded.seeded) week = currentWeek();
     const games = db.prepare('SELECT id, winner FROM games WHERE week_id = ?').all(week.id);
     const decided = games.filter((g) => g.winner);
     const users = db.prepare('SELECT id, username, name FROM users WHERE is_admin = 0 ORDER BY username').all();
@@ -613,7 +918,7 @@ async function handleApi(req, res, url) {
     if (!admin) return;
     const week = currentWeek();
     const view = poolView(week);
-    const users = db.prepare('SELECT id, username, name FROM users WHERE is_admin = 0 ORDER BY username').all();
+    const users = db.prepare('SELECT id, username, name, email FROM users WHERE is_admin = 0 ORDER BY username').all();
     const wager = Number(getSetting('per_pick_amount') || '0.50');
     const games = db.prepare('SELECT * FROM games WHERE week_id = ? ORDER BY kickoff, id').all(week.id);
     const players = users.map((u) => {
@@ -622,7 +927,7 @@ async function handleApi(req, res, url) {
         .filter((p) => games.some((g) => g.id === p.game_id));
       const paidRow = db.prepare('SELECT paid FROM payments WHERE user_id = ? AND week_id = ?').get(u.id, week.id);
       return {
-        id: u.id, username: u.username, name: u.name || null,
+        id: u.id, username: u.username, name: u.name || null, email: u.email || null,
         status: part ? part.status : 'no_response',
         picks: Object.fromEntries(picks.map((p) => [p.game_id, p.team])),
         pickCount: picks.length,
@@ -663,6 +968,43 @@ async function handleApi(req, res, url) {
       ON CONFLICT(user_id, week_id) DO UPDATE SET paid = excluded.paid`)
       .run(body.user_id, week.id, body.paid ? 1 : 0);
     return sendJson(res, 200, { ok: true });
+  }
+
+  // Admin-only player removal. Deletes the player account and everything
+  // tied to it (picks, participation, payments, sessions) in one
+  // transaction. Used for test accounts and players who never play.
+  // A removed person can re-register while registration stays open.
+  if (req.method === 'POST' && pathName === '/api/admin/remove-player') {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
+    const body = await readJson(req);
+    const target = db.prepare('SELECT id, username FROM users WHERE id = ? AND is_admin = 0').get(body.user_id);
+    if (!target) return sendJson(res, 404, { error: 'Player not found' });
+    try {
+      db.exec('BEGIN');
+      db.prepare('DELETE FROM picks WHERE user_id = ?').run(target.id);
+      db.prepare('DELETE FROM participation WHERE user_id = ?').run(target.id);
+      db.prepare('DELETE FROM payments WHERE user_id = ?').run(target.id);
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(target.id);
+      db.prepare('DELETE FROM users WHERE id = ?').run(target.id);
+      db.exec('COMMIT');
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch {}
+      return sendJson(res, 500, { error: 'Remove failed' });
+    }
+    return sendJson(res, 200, { ok: true, username: target.username });
+  }
+
+  // Admin fallback for automatic seeding: seed the next week from ESPN
+  // now. Same safety gates as the automatic path, except the finished-
+  // week check is skipped — the Tuesday-open gate still applies, so this
+  // can never hide a live week early.
+  if (req.method === 'POST' && pathName === '/api/admin/seed-next-week') {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
+    const week = currentWeek();
+    const result = await maybeAutoSeedNextWeek(week, { force: true });
+    return sendJson(res, 200, result);
   }
 
   // Team season records shown under each team on the pick sheet.
