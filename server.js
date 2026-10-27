@@ -243,9 +243,11 @@ function seed() {
     db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run(key, value);
   }
   // Team season records (W-L-T) as of Oct 23, 2026, from Sky Sports'
-  // NFL standings page (Fri Oct 23, 2026). INSERT OR IGNORE so records
-  // the admin edits in the panel survive restarts and redeploys.
-  // Records do NOT auto-update from game results; the admin edits them.
+  // NFL standings page (Fri Oct 23, 2026). This is only the initial
+  // fill: maybeAutoFetchRecords refreshes all 32 teams from ESPN's
+  // public standings feed on pool/standings loads, so records stay
+  // current with no manual update. INSERT OR IGNORE so the seed never
+  // overwrites a refreshed row.
   const TEAM_RECORDS = [
     ['Patriots', 4, 3, 0],
     ['Bears', 5, 2, 0],
@@ -482,6 +484,62 @@ async function maybeAutoFetchResults(week) {
 // - Never duplicates: returns early if the next week already exists.
 // - Any failure is logged and ignored; the admin button retries it.
 const ABBR_TO_TEAM = Object.fromEntries(Object.entries(ESPN_ABBR).map(([name, abbr]) => [abbr, name]));
+
+// ------------------------------------------------------------------
+// Automatic team-records refresh.
+// The W-L-T records shown under each team on the pick sheet used to be
+// hand-typed by the admin. Now the server refreshes them itself from
+// ESPN's public standings feed — no manual update, ever. It runs on
+// pool/standings loads, alongside the results auto-fetch and the
+// next-week auto-seed, throttled to one check per 10 minutes.
+// - One fetch covers all 32 teams (AFC + NFC), including teams that had
+//   no seeded row (e.g. Commanders, Bills, Jaguars, Chargers).
+// - Entries with an abbreviation the app doesn't know, or with
+//   malformed/non-integer stats, are skipped.
+// - ESPN is the source of truth: an admin edit in Team records is
+//   overwritten by the next refresh. The panel remains as a fallback
+//   for the (rare) case ESPN's feed is wrong or down.
+// - Any failure is logged and ignored; the old records stay on screen.
+// - ESPN_STANDINGS_URL (env) overrides the feed URL; tests use it to
+//   point at a local stub instead of the real source.
+const ESPN_STANDINGS_URL = process.env.ESPN_STANDINGS_URL || 'https://site.api.espn.com/apis/v2/sports/football/nfl/standings';
+let lastAutoRecordsAt = 0;
+
+async function maybeAutoFetchRecords() {
+  try {
+    const now = Date.now();
+    if (now - lastAutoRecordsAt < AUTO_FETCH_MIN_MS) return;
+    lastAutoRecordsAt = now;
+    const res = await fetch(ESPN_STANDINGS_URL, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error('ESPN standings HTTP ' + res.status);
+    const data = await res.json();
+    const existing = db.prepare('SELECT wins, losses, ties FROM team_records WHERE team = ?');
+    const upsert = db.prepare(`INSERT INTO team_records (team, wins, losses, ties) VALUES (?, ?, ?, ?)
+      ON CONFLICT(team) DO UPDATE SET wins = excluded.wins, losses = excluded.losses, ties = excluded.ties`);
+    let updated = 0;
+    for (const child of (data.children || [])) {
+      for (const entry of ((child.standings && child.standings.entries) || [])) {
+        const team = entry.team || {};
+        // Map by ESPN abbreviation ('KC' -> app 'Chiefs'). Entries with
+        // an abbreviation the app doesn't know are skipped rather than
+        // inserted under a possibly-mismatched name.
+        const name = ABBR_TO_TEAM[String(team.abbreviation || '').toUpperCase()];
+        if (!name) continue;
+        const byName = {};
+        for (const s of (entry.stats || [])) byName[s.name] = s.value;
+        const wins = Number(byName.wins), losses = Number(byName.losses), ties = Number(byName.ties ?? 0);
+        if (![wins, losses, ties].every((n) => Number.isInteger(n) && n >= 0 && n <= 30)) continue;
+        const row = existing.get(name);
+        if (row && row.wins === wins && row.losses === losses && row.ties === ties) continue;
+        upsert.run(name, wins, losses, ties);
+        updated++;
+      }
+    }
+    if (updated) console.log('[records] auto-refreshed ' + updated + ' team record(s)');
+  } catch (e) {
+    console.log('[records] auto-refresh skipped: ' + (e && e.message ? e.message : e));
+  }
+}
 let lastAutoSeedAt = 0;
 
 function tzOffsetString(date, timeZone) {
@@ -826,6 +884,7 @@ async function handleApi(req, res, url) {
     await maybeAutoFetchResults(week);
     const seeded = await maybeAutoSeedNextWeek(week);
     if (seeded.seeded) week = currentWeek();
+    await maybeAutoFetchRecords();
     return sendJson(res, 200, poolView(week));
   }
 
@@ -887,6 +946,7 @@ async function handleApi(req, res, url) {
     await maybeAutoFetchResults(week);
     const seeded = await maybeAutoSeedNextWeek(week);
     if (seeded.seeded) week = currentWeek();
+    await maybeAutoFetchRecords();
     const games = db.prepare('SELECT id, winner FROM games WHERE week_id = ?').all(week.id);
     const decided = games.filter((g) => g.winner);
     const users = db.prepare('SELECT id, username, name FROM users WHERE is_admin = 0 ORDER BY username').all();
@@ -1008,7 +1068,9 @@ async function handleApi(req, res, url) {
   }
 
   // Team season records shown under each team on the pick sheet.
-  // Admin-only. Records do NOT auto-update from results; edit here.
+  // Admin-only. Records auto-refresh from ESPN on pool/standings
+  // loads; an edit here is overwritten by the next refresh, so use it
+  // only to correct a bad feed value.
   if (req.method === 'GET' && pathName === '/api/admin/records') {
     const admin = requireAdmin(req, res);
     if (!admin) return;
