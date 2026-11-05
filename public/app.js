@@ -128,14 +128,40 @@ async function loadPicks() {
   }));
 }
 
-async function loadStandings() {
-  const data = await api('/api/standings');
+// Standings for the selected week. Defaults to the current week; the
+// selector lists every week, newest first, and remembers the choice
+// while the tab is revisited. The winner line sits above the table so
+// the week's winner is unmistakable, not something to work out from
+// the rows. For a past week the week is final, so the top-wins
+// player(s) are the winner(s) even if a tied game left one game
+// undecided — ties list every tied player, since ties split the pot.
+// For the current week the old rule stays: no winner line until every
+// game is decided, so a mid-week leader is never shown as the winner.
+let standingsWeekId = null;
+
+async function loadStandings(weekId) {
+  const { weeks, currentWeekId } = await api('/api/weeks');
+  const sel = $('standingsWeekSelect');
+  const keep = weekId !== undefined ? weekId : (standingsWeekId !== null ? standingsWeekId : currentWeekId);
+  sel.innerHTML = weeks.map((w) => {
+    const name = w.label || ('Week ' + w.week_number);
+    return '<option value="' + w.id + '"' + (w.id === keep ? ' selected' : '') + '>' + name + (w.isCurrent ? ' (current)' : '') + '</option>';
+  }).join('');
+  const chosen = weeks.some((w) => w.id === keep) ? keep : currentWeekId;
+  standingsWeekId = chosen;
+  sel.value = String(chosen);
+  const data = await api('/api/standings?week_id=' + chosen);
   $('standingsLine').textContent = (data.week.label || 'Week ' + data.week.week_number) + ' · ' + data.decidedGames + ' of ' + data.totalGames + ' games decided.';
   document.querySelector('#standingsTable tbody').innerHTML = data.standings.map((s) =>
     '<tr><td>' + displayName(s) + '</td><td>' + s.wins + '</td><td>' + s.pickCount + '</td></tr>').join('');
-  if (data.decidedGames === data.totalGames && data.winners.length) {
+  const showWinner = data.winners.length && (!data.week.isCurrent || data.decidedGames === data.totalGames);
+  if (showWinner) {
+    const winnerNames = data.winners.map((un) => {
+      const row = data.standings.find((s) => s.username === un);
+      return row ? displayName(row) : un;
+    });
     $('winnerLine').classList.remove('hidden');
-    $('winnerLine').textContent = 'Week winner' + (data.winners.length > 1 ? 's (tie — pot split)' : '') + ': ' + data.winners.join(', ') +
+    $('winnerLine').textContent = 'Winner' + (data.winners.length > 1 ? 's (tie — pot split)' : '') + ': ' + winnerNames.join(', ') +
       ' · Pot ' + fmtMoney(data.pot) + ' · ' + fmtMoney(data.sharePerWinner) + ' each.';
   } else {
     $('winnerLine').classList.add('hidden');
@@ -345,6 +371,10 @@ $('seedNextWeekBtn').addEventListener('click', async () => {
     $('seedNextWeekMsg').textContent = e.message;
   }
 });
+
+// Standings week selector: static HTML, so attach once here (not inside
+// loadStandings, which re-renders the options).
+$('standingsWeekSelect').addEventListener('change', () => loadStandings(Number($('standingsWeekSelect').value)));
 
 $('adminSetupBtn').addEventListener('click', async () => {
   $('authError').classList.add('hidden');
