@@ -701,6 +701,39 @@ function poolView(week) {
   };
 }
 
+// Standings for ONE week, shared by the current-week endpoint and the
+// past-weeks view. All win/tie logic lives here only: wins count picks
+// that match a decided game; winners are every player tied on the most
+// wins; the pot is the week's total owed, split evenly among the
+// winners. The week.id/status/isCurrent fields are additive — the
+// existing response shape is otherwise unchanged.
+function computeStandings(week) {
+  const games = db.prepare('SELECT id, winner FROM games WHERE week_id = ?').all(week.id);
+  const decided = games.filter((g) => g.winner);
+  const users = db.prepare('SELECT id, username, name FROM users WHERE is_admin = 0 ORDER BY username').all();
+  const wager = Number(getSetting('per_pick_amount') || '0.50');
+  const rows = users.map((u) => {
+    const picks = db.prepare('SELECT game_id, team FROM picks WHERE user_id = ?').all(u.id);
+    const wins = picks.filter((p) => {
+      const g = games.find((x) => x.id === p.game_id);
+      return g && g.winner && g.winner === p.team;
+    }).length;
+    const paidRow = db.prepare('SELECT paid FROM payments WHERE user_id = ? AND week_id = ?').get(u.id, week.id);
+    return { id: u.id, username: u.username, name: u.name || null, wins, pickCount: picks.filter((p) => games.some((g) => g.id === p.game_id)).length, owed: +(picks.filter((p) => games.some((g) => g.id === p.game_id)).length * wager).toFixed(2), paid: !!(paidRow && paidRow.paid) };
+  });
+  rows.sort((a, b) => b.wins - a.wins || a.username.localeCompare(b.username));
+  const topWins = rows.length && decided.length ? Math.max(...rows.map((r) => r.wins)) : null;
+  const winners = topWins !== null ? rows.filter((r) => r.wins === topWins) : [];
+  const pot = +rows.reduce((sum, r) => sum + r.owed, 0).toFixed(2);
+  const share = winners.length ? +(pot / winners.length).toFixed(2) : 0;
+  const current = currentWeek();
+  return {
+    week: { id: week.id, season: week.season, week_number: week.week_number, label: week.label || null, status: weekStatus(week), isCurrent: week.id === current.id },
+    decidedGames: decided.length, totalGames: games.length,
+    standings: rows, winners: winners.map((w) => w.username), pot, sharePerWinner: share,
+  };
+}
+
 // ------------------------------------------------------------------ routes
 async function handleApi(req, res, url) {
   const pathName = url.pathname;
@@ -939,37 +972,42 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { ok: true });
   }
 
+  // Week list for the Standings week selector. Any signed-in player can
+  // read it. Newest first, with the current week flagged so the UI can
+  // default to it and tell past weeks apart from the current one.
+  if (req.method === 'GET' && pathName === '/api/weeks') {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const current = currentWeek();
+    const weeks = db.prepare('SELECT id, season, week_number, label, open_at, lock_at FROM weeks ORDER BY season DESC, week_number DESC').all()
+      .map((w) => ({ id: w.id, season: w.season, week_number: w.week_number, label: w.label || null, status: weekStatus(w), isCurrent: w.id === current.id }));
+    return sendJson(res, 200, { weeks, currentWeekId: current.id });
+  }
+
+  // Standings. No week_id = current week, exactly as before (including
+  // the results auto-fetch and next-week auto-seed side effects). With
+  // ?week_id=, a past week computes directly with no side effects:
+  // past weeks are final, and loading one must never trigger a seed or
+  // a results fetch for the current week.
   if (req.method === 'GET' && pathName === '/api/standings') {
     const user = requireUser(req, res);
     if (!user) return;
+    const weekIdParam = url.searchParams.get('week_id');
+    if (weekIdParam !== null) {
+      const weekId = Number(weekIdParam);
+      if (!Number.isInteger(weekId)) return sendJson(res, 400, { error: 'Invalid week' });
+      const week = db.prepare('SELECT * FROM weeks WHERE id = ?').get(weekId);
+      if (!week) return sendJson(res, 404, { error: 'Week not found' });
+      if (week.id !== currentWeek().id) return sendJson(res, 200, computeStandings(week));
+      // week_id of the current week: fall through to the current-week
+      // path below so behavior matches the no-parameter call exactly.
+    }
     let week = currentWeek();
     await maybeAutoFetchResults(week);
     const seeded = await maybeAutoSeedNextWeek(week);
     if (seeded.seeded) week = currentWeek();
     await maybeAutoFetchRecords();
-    const games = db.prepare('SELECT id, winner FROM games WHERE week_id = ?').all(week.id);
-    const decided = games.filter((g) => g.winner);
-    const users = db.prepare('SELECT id, username, name FROM users WHERE is_admin = 0 ORDER BY username').all();
-    const wager = Number(getSetting('per_pick_amount') || '0.50');
-    const rows = users.map((u) => {
-      const picks = db.prepare('SELECT game_id, team FROM picks WHERE user_id = ?').all(u.id);
-      const wins = picks.filter((p) => {
-        const g = games.find((x) => x.id === p.game_id);
-        return g && g.winner && g.winner === p.team;
-      }).length;
-      const paidRow = db.prepare('SELECT paid FROM payments WHERE user_id = ? AND week_id = ?').get(u.id, week.id);
-      return { id: u.id, username: u.username, name: u.name || null, wins, pickCount: picks.filter((p) => games.some((g) => g.id === p.game_id)).length, owed: +(picks.filter((p) => games.some((g) => g.id === p.game_id)).length * wager).toFixed(2), paid: !!(paidRow && paidRow.paid) };
-    });
-    rows.sort((a, b) => b.wins - a.wins || a.username.localeCompare(b.username));
-    const topWins = rows.length && decided.length ? Math.max(...rows.map((r) => r.wins)) : null;
-    const winners = topWins !== null ? rows.filter((r) => r.wins === topWins) : [];
-    const pot = +rows.reduce((sum, r) => sum + r.owed, 0).toFixed(2);
-    const share = winners.length ? +(pot / winners.length).toFixed(2) : 0;
-    return sendJson(res, 200, {
-      week: { season: week.season, week_number: week.week_number, label: week.label || null },
-      decidedGames: decided.length, totalGames: games.length,
-      standings: rows, winners: winners.map((w) => w.username), pot, sharePerWinner: share,
-    });
+    return sendJson(res, 200, computeStandings(week));
   }
 
   // ------------------------------------------------------------- admin
