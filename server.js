@@ -188,9 +188,14 @@ function seed() {
   // One week_number per season: this is what makes concurrent auto-seed
   // attempts safe (two loads racing past the early check cannot both
   // insert; the loser gets a constraint error, not a duplicate week).
-  try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_weeks_season_number ON weeks(season, week_number)'); }
-  catch (e) { console.log('[seed] weeks unique index skipped: ' + (e && e.message ? e.message : e)); }
-  const existing = db.prepare('SELECT id FROM weeks WHERE season = 2026 AND week_number = 7').get();
+  // Sport dimension: NFL weeks predate it and default to 'nfl'. The
+  // unique index is per (season, sport, week_number) so NFL and NBA
+  // weeks can share a week_number without colliding.
+  const weekCols2 = db.prepare('PRAGMA table_info(weeks)').all().map((c) => c.name);
+  if (!weekCols2.includes('sport')) db.exec("ALTER TABLE weeks ADD COLUMN sport TEXT NOT NULL DEFAULT 'nfl'");
+  db.exec('DROP INDEX IF EXISTS idx_weeks_season_number');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_weeks_season_sport_number ON weeks(season, sport, week_number)');
+  const existing = db.prepare("SELECT id FROM weeks WHERE season = 2026 AND sport = 'nfl' AND week_number = 7").get();
   if (!existing) {
     const w = db.prepare(
       "INSERT INTO weeks (season, week_number, nfl_week, open_at, lock_at) VALUES (2026, 7, 7, '2026-10-20T05:00:00Z', '2026-10-22T22:00:00Z')"
@@ -223,7 +228,7 @@ function seed() {
     ['Chiefs', 'Seahawks', '2026-10-25T20:20:00-04:00', 'Sun Oct 25, 8:20 PM ET'],
     ['Cowboys', 'Eagles', '2026-10-26T20:15:00-04:00', 'Mon Oct 26, 8:15 PM ET'],
   ];
-  const mini = db.prepare('SELECT id FROM weeks WHERE season = 2026 AND week_number = 8').get();
+  const mini = db.prepare("SELECT id FROM weeks WHERE season = 2026 AND sport = 'nfl' AND week_number = 8").get();
   if (!mini) {
     const w = db.prepare(
       "INSERT INTO weeks (season, week_number, open_at, lock_at, label, note) VALUES (2026, 8, '2026-10-22T23:00:00Z', '2026-10-25T15:00:00Z', 'Mini Test — Oct 25–26', 'Mini test week — Sunday and Monday games only.')"
@@ -239,7 +244,7 @@ function seed() {
   if (!admin) {
     db.prepare('INSERT INTO users (username, is_admin) VALUES (?, 1)').run('admin');
   }
-  for (const [key, value] of [['group_name', ''], ['per_pick_amount', '0.50']]) {
+  for (const [key, value] of [['group_name', ''], ['per_pick_amount', '0.50'], ['per_pick_amount_nba', '0.10']]) {
     db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run(key, value);
   }
   // Team season records (W-L-T) as of Oct 23, 2026, from Sky Sports'
@@ -303,7 +308,7 @@ function seed() {
     ['Eagles', 'Commanders', '2026-11-01T20:20:00-05:00', 'Sun Nov 1, 8:20 PM ET'],
     ['Bears', 'Seahawks', '2026-11-02T20:15:00-05:00', 'Mon Nov 2, 8:15 PM ET'],
   ];
-  const w8 = db.prepare('SELECT id FROM weeks WHERE season = 2026 AND week_number = 9').get();
+  const w8 = db.prepare("SELECT id FROM weeks WHERE season = 2026 AND sport = 'nfl' AND week_number = 9").get();
   if (!w8) {
     const w = db.prepare(
       "INSERT INTO weeks (season, week_number, nfl_week, open_at, lock_at, label, note) VALUES (2026, 9, 8, '2026-10-27T05:00:00Z', '2026-10-29T17:00:00Z', 'Week 8', 'Full Week 8 — Thursday through Monday games.')"
@@ -342,8 +347,15 @@ function setSetting(key, value) {
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
     .run(key, value);
 }
-function currentWeek() {
-  return db.prepare('SELECT * FROM weeks ORDER BY season DESC, week_number DESC LIMIT 1').get();
+function currentWeek(sport = 'nfl') {
+  return db.prepare('SELECT * FROM weeks WHERE sport = ? ORDER BY season DESC, week_number DESC LIMIT 1').get(sport);
+}
+// Per-sport wager. NFL keeps the existing 'per_pick_amount' key ($0.25
+// live); NBA has its own key so the admin can price each sport apart
+// and raise the NBA price when games dwindle (e.g. playoffs).
+function wagerForSport(sport) {
+  if (sport === 'nba') return Number(getSetting('per_pick_amount_nba') || '0.10');
+  return Number(getSetting('per_pick_amount') || '0.50');
 }
 function getUserFromRequest(req) {
   const cookie = (req.headers.cookie || '').split(';').map((s) => s.trim())
@@ -610,7 +622,7 @@ async function maybeAutoSeedNextWeek(week, opts = {}) {
     if (week.nfl_week == null) return { ok: false, seeded: false, reason: 'current week has no NFL week number' };
     const nextNfl = week.nfl_week + 1;
     if (nextNfl > 18) return { ok: false, seeded: false, reason: 'regular season is over' };
-    const nextApp = db.prepare('SELECT id FROM weeks WHERE season = ? AND week_number = ?').get(week.season, week.week_number + 1);
+    const nextApp = db.prepare("SELECT id FROM weeks WHERE season = ? AND sport = 'nfl' AND week_number = ?").get(week.season, week.week_number + 1);
     if (nextApp) return { ok: false, seeded: false, reason: 'next week already exists' };
     const games = db.prepare('SELECT * FROM games WHERE week_id = ? ORDER BY kickoff, id').all(week.id);
     if (!games.length) return { ok: false, seeded: false, reason: 'current week has no games' };
@@ -647,7 +659,7 @@ async function maybeAutoSeedNextWeek(week, opts = {}) {
     db.exec('BEGIN');
     try {
       const w = db.prepare(
-        'INSERT INTO weeks (season, week_number, nfl_week, open_at, lock_at, label, note) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        "INSERT INTO weeks (season, week_number, sport, nfl_week, open_at, lock_at, label, note) VALUES (?, ?, 'nfl', ?, ?, ?, ?, ?)"
       ).run(week.season, week.week_number + 1, nextNfl, open_at, lock_at, label, 'Auto-seeded from the NFL schedule.');
       const ins = db.prepare(
         'INSERT INTO games (week_id, away_team, home_team, kickoff, kickoff_label) VALUES (?, ?, ?, ?, ?)'
@@ -667,6 +679,225 @@ async function maybeAutoSeedNextWeek(week, opts = {}) {
     return { ok: true, seeded: true, label, gameCount: list.length };
   } catch (e) {
     console.log('[seed] auto-seed skipped: ' + (e && e.message ? e.message : e));
+    return { ok: false, seeded: false, reason: 'fetch failed' };
+  }
+}
+
+// ------------------------------------------------------------------ NBA
+// NBA is a second pool in the same app: same logins, same admin, same
+// ledger rules, but its own weeks, standings and pot (never mixed with
+// NFL money). An NBA "week" is a Thursday–Monday slate — the NBA has no
+// numbered weeks — priced separately (per_pick_amount_nba, $0.10 to
+// start) so the admin can raise it when games dwindle (e.g. playoffs).
+// The slate range is one constant: add -2 and -1 to
+// NBA_WEEK_DAY_OFFSETS to include Tuesday/Wednesday games later.
+// - Results come from ESPN's public NBA scoreboard, same pattern as the
+//   NFL auto-fetch: final games only, never overwrite an admin-entered
+//   winner, throttled to one check per 10 minutes.
+// - Weeks seed themselves like the NFL's: once the Tuesday open for the
+//   next Thursday–Monday slate has arrived and the current slate is
+//   finished (all decided, or last tip-off 12+ hours old).
+// - ESPN_NBA_SCOREBOARD_URL (env) overrides the feed URL; tests point
+//   it at a local stub instead of the real source.
+// Abbreviations verified against the live ESPN NBA scoreboard
+// (Nov 5, 2026): Warriors are GS, Pelicans NO, Knicks NY, Spurs SA,
+// Jazz UTAH — not GSW/NOP/NYK/SAS/UTA.
+const NBA_WEEK_DAY_OFFSETS = [0, 1, 2, 3, 4]; // Thu, Fri, Sat, Sun, Mon
+const NBA_FIRST_THURSDAY = '2026-11-12'; // first NBA slate: Thu Nov 12–Mon Nov 16, 2026
+const ESPN_NBA_BASE = process.env.ESPN_NBA_SCOREBOARD_URL || 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard';
+const NBA_ABBR = {
+  Hawks: 'ATL', Celtics: 'BOS', Nets: 'BKN', Hornets: 'CHA', Bulls: 'CHI',
+  Cavaliers: 'CLE', Mavericks: 'DAL', Nuggets: 'DEN', Pistons: 'DET', Warriors: 'GS',
+  Rockets: 'HOU', Pacers: 'IND', Clippers: 'LAC', Lakers: 'LAL', Grizzlies: 'MEM',
+  Heat: 'MIA', Bucks: 'MIL', Timberwolves: 'MIN', Pelicans: 'NO', Knicks: 'NY',
+  Thunder: 'OKC', Magic: 'ORL', '76ers': 'PHI', Suns: 'PHX', 'Trail Blazers': 'POR',
+  Kings: 'SAC', Spurs: 'SA', Raptors: 'TOR', Jazz: 'UTAH', Wizards: 'WSH',
+};
+const ABBR_TO_NBA_TEAM = Object.fromEntries(Object.entries(NBA_ABBR).map(([name, abbr]) => [abbr, name]));
+let lastAutoFetchNbaAt = 0;
+let lastAutoSeedNbaAt = 0;
+
+function chicagoDateParts(date) {
+  // Chicago wall-clock date parts for an instant.
+  const fmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' });
+  const parts = fmt.formatToParts(date);
+  const get = (t) => parts.find((p) => p.type === t).value;
+  const wd = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[get('weekday')];
+  return { year: Number(get('year')), month: Number(get('month')), day: Number(get('day')), weekday: wd };
+}
+function addDaysUTC(y, m, d, n) {
+  const t = new Date(Date.UTC(y, m - 1, d) + n * 86400000);
+  return { year: t.getUTCFullYear(), month: t.getUTCMonth() + 1, day: t.getUTCDate() };
+}
+function nbaThursdayFor(date) {
+  // Thursday of the Thu–Mon cycle containing this instant (Chicago date).
+  const p = chicagoDateParts(date);
+  if (p.weekday === 2 || p.weekday === 3) return addDaysUTC(p.year, p.month, p.day, 4 - p.weekday); // Tue/Wed -> coming Thu
+  return addDaysUTC(p.year, p.month, p.day, -((p.weekday + 7 - 4) % 7)); // Thu–Mon -> this cycle's Thu
+}
+function nbaWindowForThursday(thu) {
+  const tue = addDaysUTC(thu.year, thu.month, thu.day, -2);
+  return {
+    open_at: chicagoWallToUTC(tue.year, tue.month, tue.day, 0, 0),
+    lock_at: chicagoWallToUTC(thu.year, thu.month, thu.day, 12, 0),
+  };
+}
+function nbaWeekLabel(thu, mon) {
+  const monthShort = (p) => new Intl.DateTimeFormat('en-US', { month: 'short', timeZone: 'UTC' }).format(new Date(Date.UTC(p.year, p.month - 1, p.day)));
+  if (thu.month === mon.month && thu.year === mon.year) return 'NBA · ' + monthShort(thu) + ' ' + thu.day + '–' + mon.day;
+  return 'NBA · ' + monthShort(thu) + ' ' + thu.day + '–' + monthShort(mon) + ' ' + mon.day;
+}
+function nbaDatesForThursday(thu) {
+  return NBA_WEEK_DAY_OFFSETS.map((off) => {
+    const p = addDaysUTC(thu.year, thu.month, thu.day, off);
+    return String(p.year) + String(p.month).padStart(2, '0') + String(p.day).padStart(2, '0');
+  });
+}
+
+async function fetchNbaGamesForDates(dates) {
+  // dates: ['YYYYMMDD', ...]. Returns sorted [{away, home, date}].
+  const byPair = new Map();
+  for (const d of dates) {
+    const res = await fetch(ESPN_NBA_BASE + '?dates=' + d, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error('ESPN NBA scoreboard HTTP ' + res.status);
+    const data = await res.json();
+    for (const ev of (data.events || [])) {
+      const comp = ev.competitions && ev.competitions[0];
+      if (!comp || !ev.date) continue;
+      const teams = {};
+      for (const c of (comp.competitors || [])) {
+        const abbr = c.team && c.team.abbreviation ? String(c.team.abbreviation).toUpperCase() : '';
+        if (abbr && ABBR_TO_NBA_TEAM[abbr]) teams[c.homeAway] = ABBR_TO_NBA_TEAM[abbr];
+      }
+      if (!teams.away || !teams.home) continue;
+      const key = teams.away + '@' + teams.home;
+      if (!byPair.has(key)) byPair.set(key, { away: teams.away, home: teams.home, date: new Date(ev.date) });
+    }
+  }
+  return [...byPair.values()].sort((a, b) => a.date - b.date);
+}
+
+async function maybeAutoFetchNbaResults(week) {
+  try {
+    const undecided = db.prepare('SELECT * FROM games WHERE week_id = ? AND winner IS NULL').all(week.id);
+    if (!undecided.length) return;
+    const now = Date.now();
+    if (now - lastAutoFetchNbaAt < AUTO_FETCH_MIN_MS) return;
+    lastAutoFetchNbaAt = now;
+    const dates = [...new Set(undecided.map((g) => etDateOf(g.kickoff)))];
+    const eventsByPair = new Map();
+    for (const d of dates) {
+      const res = await fetch(ESPN_NBA_BASE + '?dates=' + d, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) throw new Error('ESPN NBA scoreboard HTTP ' + res.status);
+      const data = await res.json();
+      for (const ev of (data.events || [])) {
+        const comp = ev.competitions && ev.competitions[0];
+        if (!comp) continue;
+        const state = comp.status && comp.status.type && comp.status.type.state;
+        if (state !== 'post') continue; // only final games
+        const teams = {};
+        for (const c of (comp.competitors || [])) {
+          const abbr = c.team && c.team.abbreviation;
+          if (abbr) teams[c.homeAway] = { abbr: String(abbr).toUpperCase(), score: c.score };
+        }
+        if (!teams.away || !teams.home) continue;
+        if (teams.away.score == null || teams.home.score == null) continue;
+        eventsByPair.set(teams.away.abbr + '@' + teams.home.abbr, teams);
+      }
+    }
+    const setWinner = db.prepare('UPDATE games SET winner = ? WHERE id = ? AND winner IS NULL');
+    let filled = 0;
+    for (const g of undecided) {
+      const key = (NBA_ABBR[g.away_team] || '') + '@' + (NBA_ABBR[g.home_team] || '');
+      const ev = eventsByPair.get(key);
+      if (!ev) continue;
+      const awayScore = Number(ev.away.score);
+      const homeScore = Number(ev.home.score);
+      if (Number.isNaN(awayScore) || Number.isNaN(homeScore)) continue;
+      if (awayScore === homeScore) continue; // a tie has no winner; leave it for the admin
+      const winner = awayScore > homeScore ? g.away_team : g.home_team;
+      if (setWinner.run(winner, g.id).changes) filled++;
+    }
+    if (filled) console.log('[results] auto-filled ' + filled + ' NBA winner(s) for week ' + week.week_number);
+  } catch (e) {
+    console.log('[results] NBA auto-fetch skipped: ' + (e && e.message ? e.message : e));
+  }
+}
+
+async function maybeAutoSeedNextNbaWeek(week, opts = {}) {
+  try {
+    const force = !!opts.force; // admin button: skips the finished-week check only
+    let thursday;
+    let weekNumber;
+    let season;
+    if (week) {
+      // Next Thursday is 7 days after this week's Thursday, which is
+      // the earliest game date in the week (slates start Thursday).
+      const games = db.prepare('SELECT kickoff FROM games WHERE week_id = ? ORDER BY kickoff').all(week.id);
+      if (!games.length) return { ok: false, seeded: false, reason: 'current NBA week has no games' };
+      const first = String(games[0].kickoff).slice(0, 10).split('-').map(Number);
+      thursday = addDaysUTC(first[0], first[1], first[2], 7);
+      weekNumber = week.week_number + 1;
+      season = thursday.year;
+      const undecided = db.prepare('SELECT COUNT(*) AS n FROM games WHERE week_id = ? AND winner IS NULL').get(week.id).n;
+      const lastKickoffMs = Math.max(...games.map((g) => new Date(g.kickoff).getTime()));
+      const finaleOver = Date.now() > lastKickoffMs + 12 * 60 * 60 * 1000;
+      if (!force && undecided > 0 && !finaleOver) return { ok: false, seeded: false, reason: 'current NBA week is not finished' };
+    } else {
+      // No NBA week yet: the first slate is anchored to Thu Nov 12,
+      // 2026. If the app starts later, use the Thursday of the current
+      // Thu–Mon cycle instead — never a slate whose Monday is past.
+      const [ay, am, ad] = NBA_FIRST_THURSDAY.split('-').map(Number);
+      const anchor = { year: ay, month: am, day: ad };
+      const cycle = nbaThursdayFor(new Date());
+      const anchorMs = Date.UTC(anchor.year, anchor.month - 1, anchor.day);
+      const cycleMs = Date.UTC(cycle.year, cycle.month - 1, cycle.day);
+      thursday = anchorMs >= cycleMs ? anchor : cycle;
+      const monday = addDaysUTC(thursday.year, thursday.month, thursday.day, 4);
+      if (Date.now() > Date.UTC(monday.year, monday.month - 1, monday.day, 23, 59, 59)) {
+        thursday = addDaysUTC(thursday.year, thursday.month, thursday.day, 7);
+      }
+      weekNumber = 1;
+      season = thursday.year;
+    }
+    const existing = db.prepare('SELECT id FROM weeks WHERE season = ? AND sport = ? AND week_number = ?').get(season, 'nba', weekNumber);
+    if (existing) return { ok: false, seeded: false, reason: 'next NBA week already exists' };
+    const monday = addDaysUTC(thursday.year, thursday.month, thursday.day, Math.max(...NBA_WEEK_DAY_OFFSETS));
+    const { open_at, lock_at } = nbaWindowForThursday(thursday);
+    // The Tuesday-open gate comes before the throttle: a probe before
+    // the slate has opened must not consume the throttle window and
+    // delay the real seed once Tuesday arrives.
+    if (Date.now() < Date.parse(open_at)) return { ok: false, seeded: false, reason: 'next NBA week has not opened yet' };
+    if (!force) {
+      const now = Date.now();
+      if (now - lastAutoSeedNbaAt < AUTO_FETCH_MIN_MS) return { ok: false, seeded: false, reason: 'throttled' };
+      lastAutoSeedNbaAt = now;
+    }
+    const list = await fetchNbaGamesForDates(nbaDatesForThursday(thursday));
+    if (!list.length) return { ok: false, seeded: false, reason: 'no games found for next NBA week' };
+    const label = nbaWeekLabel(thursday, monday);
+    db.exec('BEGIN');
+    try {
+      const w = db.prepare(
+        "INSERT INTO weeks (season, week_number, sport, open_at, lock_at, label, note) VALUES (?, ?, 'nba', ?, ?, ?, ?)"
+      ).run(season, weekNumber, open_at, lock_at, label, 'Auto-seeded from the NBA schedule.');
+      const ins = db.prepare(
+        'INSERT INTO games (week_id, away_team, home_team, kickoff, kickoff_label) VALUES (?, ?, ?, ?, ?)'
+      );
+      for (const g of list) {
+        const k = etKickoff(g.date);
+        ins.run(w.lastInsertRowid, g.away, g.home, k.kickoff, k.label);
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch {}
+      if (/UNIQUE constraint/.test(e.message || '')) return { ok: false, seeded: false, reason: 'next NBA week already exists' };
+      throw e;
+    }
+    console.log('[seed] auto-seeded ' + label + ' (' + list.length + ' games)');
+    return { ok: true, seeded: true, label, gameCount: list.length };
+  } catch (e) {
+    console.log('[seed] NBA auto-seed skipped: ' + (e && e.message ? e.message : e));
     return { ok: false, seeded: false, reason: 'fetch failed' };
   }
 }
@@ -691,9 +922,9 @@ function poolView(week) {
     pickCount: pickCounts.get(u.id) || 0,
   }));
   return {
-    week: { season: week.season, week_number: week.week_number, label: week.label || null, note: week.note || null, open_at: week.open_at, lock_at: week.lock_at, status: weekStatus(week) },
+    week: { season: week.season, week_number: week.week_number, sport: week.sport, label: week.label || null, note: week.note || null, open_at: week.open_at, lock_at: week.lock_at, status: weekStatus(week) },
     groupName: getSetting('group_name') || '',
-    perPickAmount: Number(getSetting('per_pick_amount') || '0.50'),
+    perPickAmount: wagerForSport(week.sport),
     games: games.map((g) => ({ id: g.id, away: g.away_team, home: g.home_team, kickoffLabel: g.kickoff_label, winner: g.winner, awayRecord: recByTeam.get(g.away_team) || null, homeRecord: recByTeam.get(g.home_team) || null })),
     playing: players.filter((p) => p.status === 'playing'),
     notParticipating: players.filter((p) => p.status === 'not_participating'),
@@ -711,7 +942,7 @@ function computeStandings(week) {
   const games = db.prepare('SELECT id, winner FROM games WHERE week_id = ?').all(week.id);
   const decided = games.filter((g) => g.winner);
   const users = db.prepare('SELECT id, username, name FROM users WHERE is_admin = 0 ORDER BY username').all();
-  const wager = Number(getSetting('per_pick_amount') || '0.50');
+  const wager = wagerForSport(week.sport);
   const rows = users.map((u) => {
     const picks = db.prepare('SELECT game_id, team FROM picks WHERE user_id = ?').all(u.id);
     const wins = picks.filter((p) => {
@@ -726,9 +957,9 @@ function computeStandings(week) {
   const winners = topWins !== null ? rows.filter((r) => r.wins === topWins) : [];
   const pot = +rows.reduce((sum, r) => sum + r.owed, 0).toFixed(2);
   const share = winners.length ? +(pot / winners.length).toFixed(2) : 0;
-  const current = currentWeek();
+  const current = currentWeek(week.sport);
   return {
-    week: { id: week.id, season: week.season, week_number: week.week_number, label: week.label || null, status: weekStatus(week), isCurrent: week.id === current.id },
+    week: { id: week.id, season: week.season, week_number: week.week_number, sport: week.sport, label: week.label || null, status: weekStatus(week), isCurrent: !!current && week.id === current.id },
     decidedGames: decided.length, totalGames: games.length,
     standings: rows, winners: winners.map((w) => w.username), pot, sharePerWinner: share,
   };
@@ -979,7 +1210,7 @@ async function handleApi(req, res, url) {
     const user = requireUser(req, res);
     if (!user) return;
     const current = currentWeek();
-    const weeks = db.prepare('SELECT id, season, week_number, label, open_at, lock_at FROM weeks ORDER BY season DESC, week_number DESC').all()
+    const weeks = db.prepare("SELECT id, season, week_number, label, open_at, lock_at FROM weeks WHERE sport = 'nfl' ORDER BY season DESC, week_number DESC").all()
       .map((w) => ({ id: w.id, season: w.season, week_number: w.week_number, label: w.label || null, status: weekStatus(w), isCurrent: w.id === current.id }));
     return sendJson(res, 200, { weeks, currentWeekId: current.id });
   }
@@ -1010,14 +1241,132 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, computeStandings(week));
   }
 
+  // ------------------------------------------------------------- NBA
+  // Same pool shape as the NFL routes, scoped to sport = 'nba'.
+  // Participation, picks, standings and money all key off the NBA
+  // week's id, so the two pots can never mix.
+  if (req.method === 'GET' && pathName === '/api/nba/pool') {
+    const user = requireUser(req, res);
+    if (!user) return;
+    let week = currentWeek('nba');
+    if (!week) {
+      const seeded = await maybeAutoSeedNextNbaWeek(null);
+      if (seeded.seeded) week = currentWeek('nba');
+    }
+    if (!week) return sendJson(res, 404, { error: 'NBA has not started yet — first slate opens Tuesday Nov 10, 2026' });
+    await maybeAutoFetchNbaResults(week);
+    const seeded = await maybeAutoSeedNextNbaWeek(week);
+    if (seeded.seeded) week = currentWeek('nba');
+    return sendJson(res, 200, poolView(week));
+  }
+
+  if (req.method === 'POST' && pathName === '/api/nba/participation') {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const body = await readJson(req);
+    if (!['playing', 'not_participating'].includes(body.status)) {
+      return sendJson(res, 400, { error: 'Invalid status' });
+    }
+    const week = currentWeek('nba');
+    if (!week) return sendJson(res, 404, { error: 'NBA has not started yet' });
+    db.prepare(`INSERT INTO participation (user_id, week_id, status) VALUES (?, ?, ?)
+      ON CONFLICT(user_id, week_id) DO UPDATE SET status = excluded.status`)
+      .run(user.id, week.id, body.status);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (req.method === 'GET' && pathName === '/api/nba/my-picks') {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const week = currentWeek('nba');
+    if (!week) return sendJson(res, 404, { error: 'NBA has not started yet' });
+    const rows = db.prepare(
+      'SELECT game_id, team FROM picks WHERE user_id = ? AND game_id IN (SELECT id FROM games WHERE week_id = ?)'
+    ).all(user.id, week.id);
+    return sendJson(res, 200, { picks: Object.fromEntries(rows.map((r) => [r.game_id, r.team])) });
+  }
+
+  if (req.method === 'POST' && pathName === '/api/nba/picks') {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const week = currentWeek('nba');
+    if (!week) return sendJson(res, 404, { error: 'NBA has not started yet' });
+    if (weekStatus(week) !== 'open') {
+      return sendJson(res, 403, { error: `Picks are ${weekStatus(week) === 'locked' ? 'locked' : 'not open yet'} for this week` });
+    }
+    const part = db.prepare('SELECT status FROM participation WHERE user_id = ? AND week_id = ?').get(user.id, week.id);
+    if (!part || part.status !== 'playing') {
+      return sendJson(res, 403, { error: 'Mark yourself as playing before submitting picks' });
+    }
+    const body = await readJson(req);
+    const picks = body.picks || [];
+    const valid = new Map(db.prepare('SELECT id, away_team, home_team FROM games WHERE week_id = ?').all(week.id)
+      .map((g) => [g.id, [g.away_team, g.home_team]]));
+    const upsert = db.prepare(`INSERT INTO picks (user_id, game_id, team) VALUES (?, ?, ?)
+      ON CONFLICT(user_id, game_id) DO UPDATE SET team = excluded.team`);
+    for (const p of picks) {
+      if (!valid.has(p.game_id)) return sendJson(res, 400, { error: 'Unknown game' });
+      if (!valid.get(p.game_id).includes(p.team)) return sendJson(res, 400, { error: 'Invalid team for game' });
+      upsert.run(user.id, p.game_id, p.team);
+    }
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (req.method === 'GET' && pathName === '/api/nba/weeks') {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const current = currentWeek('nba');
+    const weeks = db.prepare("SELECT id, season, week_number, label, open_at, lock_at FROM weeks WHERE sport = 'nba' ORDER BY season DESC, week_number DESC").all()
+      .map((w) => ({ id: w.id, season: w.season, week_number: w.week_number, label: w.label || null, status: weekStatus(w), isCurrent: !!current && w.id === current.id }));
+    return sendJson(res, 200, { weeks, currentWeekId: current ? current.id : null });
+  }
+
+  // NBA standings. Same rules as the NFL endpoint: no week_id = current
+  // NBA week (with results auto-fetch and next-week auto-seed side
+  // effects); ?week_id= computes a past week directly, no side effects.
+  if (req.method === 'GET' && pathName === '/api/nba/standings') {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const weekIdParam = url.searchParams.get('week_id');
+    if (weekIdParam !== null) {
+      const weekId = Number(weekIdParam);
+      if (!Number.isInteger(weekId)) return sendJson(res, 400, { error: 'Invalid week' });
+      const week = db.prepare("SELECT * FROM weeks WHERE id = ? AND sport = 'nba'").get(weekId);
+      if (!week) return sendJson(res, 404, { error: 'Week not found' });
+      const current = currentWeek('nba');
+      if (!current || week.id !== current.id) return sendJson(res, 200, computeStandings(week));
+    }
+    let week = currentWeek('nba');
+    if (!week) return sendJson(res, 404, { error: 'NBA has not started yet' });
+    await maybeAutoFetchNbaResults(week);
+    const seeded = await maybeAutoSeedNextNbaWeek(week);
+    if (seeded.seeded) week = currentWeek('nba');
+    return sendJson(res, 200, computeStandings(week));
+  }
+
+  // Admin fallback for NBA seeding: seed the next slate now. Same
+  // safety gates as the automatic path, except the finished-week check
+  // is skipped — the Tuesday-open gate still applies, so this can never
+  // hide a live week early. With no NBA week at all, seeds the first
+  // slate (anchored to Thu Nov 12, 2026).
+  if (req.method === 'POST' && pathName === '/api/admin/seed-next-nba-week') {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
+    const week = currentWeek('nba');
+    const result = await maybeAutoSeedNextNbaWeek(week, { force: true });
+    return sendJson(res, 200, result);
+  }
+
   // ------------------------------------------------------------- admin
   if (req.method === 'GET' && pathName === '/api/admin/overview') {
     const admin = requireAdmin(req, res);
     if (!admin) return;
-    const week = currentWeek();
+    const sport = url.searchParams.get('sport') === 'nba' ? 'nba' : 'nfl';
+    const week = currentWeek(sport);
+    if (!week) return sendJson(res, 404, { error: 'No week yet for this sport' });
     const view = poolView(week);
     const users = db.prepare('SELECT id, username, name, email FROM users WHERE is_admin = 0 ORDER BY username').all();
-    const wager = Number(getSetting('per_pick_amount') || '0.50');
+    const wager = wagerForSport(sport);
     const games = db.prepare('SELECT * FROM games WHERE week_id = ? ORDER BY kickoff, id').all(week.id);
     const players = users.map((u) => {
       const part = db.prepare('SELECT status FROM participation WHERE user_id = ? AND week_id = ?').get(u.id, week.id);
@@ -1036,7 +1385,7 @@ async function handleApi(req, res, url) {
     const collected = +players.filter((p) => p.paid).reduce((s, p) => s + p.owed, 0).toFixed(2);
     const owedTotal = +players.reduce((s, p) => s + p.owed, 0).toFixed(2);
     return sendJson(res, 200, {
-      groupName: view.groupName, perPickAmount: wager,
+      sport, groupName: view.groupName, perPickAmount: wager, nbaPerPickAmount: Number(getSetting('per_pick_amount_nba') || '0.10'),
       games: games.map((g) => ({ id: g.id, away: g.away_team, home: g.home_team, kickoffLabel: g.kickoff_label, winner: g.winner })),
       players, collected, owedTotal, stillOwed: +(owedTotal - collected).toFixed(2),
     });
@@ -1052,14 +1401,21 @@ async function handleApi(req, res, url) {
       if (!Number.isFinite(n) || n < 0 || n > 100) return sendJson(res, 400, { error: 'Invalid per-pick amount' });
       setSetting('per_pick_amount', n.toFixed(2));
     }
-    return sendJson(res, 200, { ok: true, groupName: getSetting('group_name'), perPickAmount: getSetting('per_pick_amount') });
+    if (body.nba_per_pick_amount !== undefined) {
+      const n = Number(body.nba_per_pick_amount);
+      if (!Number.isFinite(n) || n < 0 || n > 100) return sendJson(res, 400, { error: 'Invalid NBA per-pick amount' });
+      setSetting('per_pick_amount_nba', n.toFixed(2));
+    }
+    return sendJson(res, 200, { ok: true, groupName: getSetting('group_name'), perPickAmount: getSetting('per_pick_amount'), nbaPerPickAmount: getSetting('per_pick_amount_nba') });
   }
 
   if (req.method === 'POST' && pathName === '/api/admin/payments') {
     const admin = requireAdmin(req, res);
     if (!admin) return;
     const body = await readJson(req);
-    const week = currentWeek();
+    const sport = body.sport === 'nba' ? 'nba' : 'nfl';
+    const week = currentWeek(sport);
+    if (!week) return sendJson(res, 404, { error: 'No week yet for this sport' });
     const target = db.prepare('SELECT id FROM users WHERE id = ? AND is_admin = 0').get(body.user_id);
     if (!target) return sendJson(res, 404, { error: 'Player not found' });
     db.prepare(`INSERT INTO payments (user_id, week_id, paid) VALUES (?, ?, ?)
