@@ -22,7 +22,7 @@
   <!-- Auth / landing view -->
   <section id="authView">
     <div class="hero">
-      <p class="hero-eyebrow">🏈 Weekly pool · $0.50 a pick</p>
+      <p class="hero-eyebrow" id="heroPrice">🏈 Weekly pool · $0.25 a pick</p>
       <h2 class="hero-title">Pick the winners.<br>Split the pot.</h2>
       <p class="hero-sub">One shared pool for the whole crew. Everyone can see who is playing, who is sitting out, and who has not answered yet — and everything flows back to the admin.</p>
     </div>
@@ -33,8 +33,8 @@
         <li><b>Register</b> — enter your full name, pick a username, and set a password. Your name shows next to your username so everyone knows who is who.</li>
         <li><b>Mark yourself Playing or Not participating</b> — everyone in the pool can see both lists.</li>
         <li><b>Pick winners</b> on the My Picks tab — tap a team to pick it to win. Each team's season record shows under its name to help you decide.</li>
-        <li><b>Lock:</b> <span id="heroLock">Mini Test — Oct 25–26 · picks lock Sun Oct 25 at 10:00 AM CT</span> — no picks after that.</li>
-        <li><b>Money:</b> <span id="heroCost">$0.50 per pick ($6.50 for a full 13-game sheet).</span> Pay and settle outside the app — the app only tracks who owes and who has paid.</li>
+        <li><b>Lock:</b> <span id="heroLock">Picks open Tuesday · lock Thursday at 12:00 PM CT</span> — no picks after that.</li>
+        <li><b>Money:</b> <span id="heroCost">$0.25 per pick.</span> Pay and settle outside the app — the app only tracks who owes and who has paid.</li>
         <li><b>Ties split the pot</b> — if two or more players tie for the most wins, they share that week's money.</li>
       </ol>
       <p class="muted">By playing, you accept the <a href="/disclaimer.html">Disclaimer</a>.</p>
@@ -95,6 +95,7 @@
       <button data-tab="picks" class="tab">My Picks</button>
       <button data-tab="standings" class="tab">Standings</button>
       <button data-tab="money" class="tab">Money</button>
+      <button data-tab="nba" class="tab">NBA</button>
       <button data-tab="admin" class="tab hidden" id="adminTabBtn">Admin</button>
     </nav>
 
@@ -151,11 +152,56 @@
       </div>
     </div>
 
+    <div id="tab-nba" class="tab-pane hidden">
+      <div class="card">
+        <h2 id="nbaWeekHeading">NBA</h2>
+        <p id="nbaLockLine" class="muted"></p>
+        <p id="nbaPoolNote" class="muted">Picks open Tuesday. All picks lock Thursday at 12:00 PM Central.</p>
+        <div class="row">
+          <button id="nbaPlayBtn" class="primary">I'm playing this week</button>
+          <button id="nbaSkipBtn">Not participating</button>
+        </div>
+        <p id="nbaPartMsg" class="muted hidden"></p>
+      </div>
+      <div class="grid3">
+        <div class="card"><h3>Playing this week</h3><ul id="nbaPlayingList"></ul></div>
+        <div class="card"><h3>Not participating</h3><ul id="nbaNotPartList"></ul></div>
+        <div class="card"><h3>No response yet</h3><ul id="nbaNoRespList"></ul></div>
+      </div>
+      <div class="card">
+        <h2>NBA pick sheet</h2>
+        <p id="nbaPickCostLine" class="muted"></p>
+        <p id="nbaPickLockNote" class="muted hidden">Picks are locked for this week.</p>
+        <div id="nbaGamesList"></div>
+        <div class="row">
+          <button id="nbaSavePicksBtn" class="primary">Save picks</button>
+          <span id="nbaSaveMsg" class="muted"></span>
+        </div>
+      </div>
+      <div class="card">
+        <h2>NBA standings</h2>
+        <label>Week <select id="nbaStandingsWeekSelect"></select></label>
+        <p id="nbaWinnerLine" class="winner hidden"></p>
+        <p id="nbaStandingsLine" class="muted"></p>
+        <table id="nbaStandingsTable">
+          <thead><tr><th>Player</th><th>Wins</th><th>Picks</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h2>NBA money — tracking only</h2>
+        <p class="muted">Separate from the NFL pot. Settle outside the app — the app only tracks who owes and who has paid.</p>
+        <p id="nbaMyMoneyLine"></p>
+        <p id="nbaPoolMoneyLine" class="muted"></p>
+      </div>
+    </div>
+
     <div id="tab-admin" class="tab-pane hidden">
       <div class="card">
         <h2>Admin — Pool settings</h2>
         <label>Group name <input id="groupNameInput" placeholder="e.g. Sunday Crew"></label>
         <label>Per-pick amount ($) <input id="wagerInput" type="number" min="0" step="0.05"></label>
+        <label>Per-pick amount — NBA ($) <input id="nbaWagerInput" type="number" min="0" step="0.05"></label>
         <button id="saveSettingsBtn" class="primary">Save settings</button>
         <p id="settingsMsg" class="muted"></p>
       </div>
@@ -183,6 +229,19 @@
         <p class="muted">The next week normally seeds itself from the NFL schedule after the current week ends and its Tuesday arrives. Use this only if that hasn't happened.</p>
         <button id="seedNextWeekBtn">Seed next week from NFL schedule</button>
         <p id="seedNextWeekMsg" class="muted"></p>
+      </div>
+      <div class="card">
+        <h2>Admin — NBA</h2>
+        <p id="nbaAdminTotals" class="muted"></p>
+        <table id="nbaPaymentsTable">
+          <thead><tr><th>Player</th><th>Email</th><th>Status</th><th>Picks</th><th>Owed</th><th>Paid</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <h3>NBA results</h3>
+        <p class="muted">Enter winners after games finish; NBA standings update from these.</p>
+        <div id="nbaResultsList"></div>
+        <button id="seedNextNbaBtn">Seed next NBA week</button>
+        <p id="seedNextNbaMsg" class="muted"></p>
       </div>
       <div class="card">
         <h2>Admin — All picks</h2>

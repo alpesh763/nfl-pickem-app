@@ -5,6 +5,9 @@ const $ = (id) => document.getElementById(id);
 let me = null;
 let pool = null;
 let myPicks = {};
+let nbaPool = null;
+let nbaPicks = {};
+let nbaStandingsWeekId = null;
 
 // NFL team nickname -> ESPN logo abbreviation (logos via ESPN's public team-logo CDN).
 const TEAM_ABBR = {
@@ -16,6 +19,17 @@ const TEAM_ABBR = {
   Titans: 'ten', Vikings: 'min',
 };
 const teamLogoUrl = (team) => 'https://a.espncdn.com/i/teamlogos/nfl/500/' + (TEAM_ABBR[team] || '') + '.png';
+
+// NBA team nickname -> ESPN logo abbreviation (same public CDN, nba path).
+const NBA_TEAM_LOGO = {
+  Hawks: 'atl', Celtics: 'bos', Nets: 'bkn', Hornets: 'cha', Bulls: 'chi',
+  Cavaliers: 'cle', Mavericks: 'dal', Nuggets: 'den', Pistons: 'det', Warriors: 'gs',
+  Rockets: 'hou', Pacers: 'ind', Clippers: 'lac', Lakers: 'lal', Grizzlies: 'mem',
+  Heat: 'mia', Bucks: 'mil', Timberwolves: 'min', Pelicans: 'no', Knicks: 'ny',
+  Thunder: 'okc', Magic: 'orl', '76ers': 'phi', Suns: 'phx', 'Trail Blazers': 'por',
+  Kings: 'sac', Spurs: 'sa', Raptors: 'tor', Jazz: 'utah', Wizards: 'was',
+};
+const nbaTeamLogoUrl = (team) => 'https://a.espncdn.com/i/teamlogos/nba/500/' + (NBA_TEAM_LOGO[team] || '') + '.png';
 let currentTab = 'pool';
 
 async function api(path, method, body) {
@@ -40,6 +54,7 @@ function showTab(tab) {
   if (tab === 'picks') loadPicks();
   if (tab === 'standings') loadStandings();
   if (tab === 'money') loadMoney();
+  if (tab === 'nba') loadNba();
   if (tab === 'admin') loadAdmin();
 }
 
@@ -179,11 +194,118 @@ async function loadMoney() {
   $('poolMoneyLine').textContent = 'Pool total: ' + fmtMoney(collected) + ' collected of ' + fmtMoney(owed) + ' owed.';
 }
 
+// NBA tab: pool + pick sheet + standings + money in one pane, mirroring
+// the NFL tabs but against the /api/nba/* routes. Before the first slate
+// opens (Tue Nov 10) the pool endpoint 404s; show that instead of
+// breaking the tab.
+async function loadNba() {
+  let data;
+  try {
+    data = await api('/api/nba/pool');
+  } catch (e) {
+    $('nbaWeekHeading').textContent = 'NBA starts Tuesday Nov 10';
+    $('nbaLockLine').textContent = e.message || '';
+    $('nbaPoolNote').textContent = 'First slate: Thu Nov 12 – Mon Nov 16, 2026. Picks open Tuesday, lock Thursday at 12:00 PM Central.';
+    $('nbaPickCostLine').textContent = '';
+    $('nbaGamesList').innerHTML = '';
+    $('nbaStandingsLine').textContent = '';
+    document.querySelector('#nbaStandingsTable tbody').innerHTML = '';
+    $('nbaMyMoneyLine').textContent = '';
+    $('nbaPoolMoneyLine').textContent = '';
+    return;
+  }
+  nbaPool = data;
+  $('nbaWeekHeading').textContent = (nbaPool.week.label || 'NBA') + ' — ' + nbaPool.week.season + ' season';
+  $('nbaLockLine').textContent = 'Picks lock ' + fmtLock(nbaPool.week.lock_at) + ' · Status: ' + nbaPool.week.status;
+  $('nbaPoolNote').textContent = nbaPool.week.note || 'Picks open Tuesday. All picks lock Thursday at 12:00 PM Central.';
+  const render = (el, list) => {
+    $(el).innerHTML = list.length
+      ? list.map((p) => '<li>' + displayName(p) + ' (' + p.pickCount + ' picks)</li>').join('')
+      : '<li class="muted">Nobody yet</li>';
+  };
+  render('nbaPlayingList', nbaPool.playing);
+  render('nbaNotPartList', nbaPool.notParticipating);
+  render('nbaNoRespList', nbaPool.noResponse);
+  const myStatus = me && (nbaPool.playing.some((p) => p.id === me.id) ? 'playing'
+    : nbaPool.notParticipating.some((p) => p.id === me.id) ? 'not_participating' : null);
+  $('nbaPlayBtn').classList.toggle('primary', myStatus === 'playing');
+  $('nbaSkipBtn').classList.toggle('primary', myStatus === 'not_participating');
+  // Pick sheet.
+  nbaPicks = (await api('/api/nba/my-picks')).picks;
+  const locked = nbaPool.week.status !== 'open';
+  $('nbaPickLockNote').classList.toggle('hidden', !locked);
+  $('nbaSavePicksBtn').disabled = locked;
+  $('nbaPickCostLine').textContent = 'Each pick costs ' + fmtMoney(nbaPool.perPickAmount) + '. Full sheet (' + nbaPool.games.length + ' picks) = ' + fmtMoney(nbaPool.perPickAmount * nbaPool.games.length) + '.';
+  $('nbaGamesList').innerHTML = nbaPool.games.map((g) => {
+    const sel = nbaPicks[g.id] || '';
+    const pickBtn = (team) => {
+      const abbr = NBA_TEAM_LOGO[team];
+      const img = abbr ? '<img class="teamLogo" src="' + nbaTeamLogoUrl(team) + '" alt="" onerror="this.style.display=\'none\'">' : '';
+      return '<button type="button" class="pickBtn nbaPickBtn' + (sel === team ? ' selected' : '') + '" data-game="' + g.id + '" data-team="' + team + '" ' + (locked ? 'disabled' : '') + '>' + img +
+        '<span class="team"><b>' + team + '</b></span></button>';
+    };
+    return '<div class="game-row"><div class="kick">' + g.kickoffLabel + (g.winner ? ' · Winner: ' + g.winner : '') + '</div>' +
+      '<div class="pickMatchup">' + pickBtn(g.away) + '<span class="vs">vs</span>' + pickBtn(g.home) + '</div></div>';
+  }).join('');
+  // Tap a team to pick it; tap the picked team again to clear it.
+  document.querySelectorAll('.nbaPickBtn').forEach((btn) => btn.addEventListener('click', () => {
+    const gid = btn.dataset.game;
+    const team = btn.dataset.team;
+    if (nbaPicks[gid] === team) {
+      delete nbaPicks[gid];
+      btn.classList.remove('selected');
+    } else {
+      nbaPicks[gid] = team;
+      document.querySelectorAll('.nbaPickBtn[data-game="' + gid + '"]').forEach((b) => b.classList.toggle('selected', b === btn));
+    }
+  }));
+  await loadNbaStandings();
+  // Money (from the current week's standings payload).
+  const standings = await api('/api/nba/standings');
+  const mine = standings.standings.find((s) => s.id === me.id);
+  $('nbaMyMoneyLine').textContent = mine
+    ? 'Your sheet: ' + mine.pickCount + ' picks · ' + fmtMoney(mine.owed) + ' owed · ' + (mine.paid ? 'Paid ✓' : 'Not paid yet')
+    : 'You have no picks this week.';
+  const collected = standings.standings.filter((s) => s.paid).reduce((s, x) => s + x.owed, 0);
+  const owed = standings.standings.reduce((s, x) => s + x.owed, 0);
+  $('nbaPoolMoneyLine').textContent = 'Pool total: ' + fmtMoney(collected) + ' collected of ' + fmtMoney(owed) + ' owed.';
+}
+
+async function loadNbaStandings(weekId) {
+  const { weeks, currentWeekId } = await api('/api/nba/weeks');
+  const sel = $('nbaStandingsWeekSelect');
+  const keep = weekId !== undefined ? weekId : (nbaStandingsWeekId !== null ? nbaStandingsWeekId : currentWeekId);
+  sel.innerHTML = weeks.map((w) => {
+    const name = w.label || ('NBA Week ' + w.week_number);
+    return '<option value="' + w.id + '"' + (w.id === keep ? ' selected' : '') + '>' + name + (w.isCurrent ? ' (current)' : '') + '</option>';
+  }).join('');
+  const chosen = weeks.some((w) => w.id === keep) ? keep : currentWeekId;
+  nbaStandingsWeekId = chosen;
+  sel.value = String(chosen);
+  const data = await api('/api/nba/standings?week_id=' + chosen);
+  $('nbaStandingsLine').textContent = (data.week.label || 'NBA Week ' + data.week.week_number) + ' · ' + data.decidedGames + ' of ' + data.totalGames + ' games decided.';
+  document.querySelector('#nbaStandingsTable tbody').innerHTML = data.standings.map((s) =>
+    '<tr><td>' + displayName(s) + '</td><td>' + s.wins + '</td><td>' + s.pickCount + '</td></tr>').join('');
+  const showWinner = data.winners.length && (!data.week.isCurrent || data.decidedGames === data.totalGames);
+  if (showWinner) {
+    const winnerNames = data.winners.map((un) => {
+      const row = data.standings.find((s) => s.username === un);
+      return row ? displayName(row) : un;
+    });
+    $('nbaWinnerLine').classList.remove('hidden');
+    $('nbaWinnerLine').textContent = 'Winner' + (data.winners.length > 1 ? 's (tie — pot split)' : '') + ': ' + winnerNames.join(', ') +
+      ' · Pot ' + fmtMoney(data.pot) + ' · ' + fmtMoney(data.sharePerWinner) + ' each.';
+  } else {
+    $('nbaWinnerLine').classList.add('hidden');
+  }
+}
+
 async function loadAdmin() {
   if (!me.isAdmin) return;
   const data = await api('/api/admin/overview');
   $('groupNameInput').value = data.groupName;
   $('wagerInput').value = data.perPickAmount;
+  $('nbaWagerInput').value = data.nbaPerPickAmount;
   $('adminTotals').textContent = fmtMoney(data.collected) + ' collected · ' + fmtMoney(data.stillOwed) + ' still owed · ' + fmtMoney(data.owedTotal) + ' total owed.';
   document.querySelector('#paymentsTable tbody').innerHTML = data.players.map((p) =>
     '<tr><td>' + displayName(p) + '</td><td>' + (p.email || '') + '</td><td>' + p.status.replace('_', ' ') + '</td><td>' + p.pickCount + '</td><td>' + fmtMoney(p.owed) + '</td>' +
@@ -229,6 +351,38 @@ async function loadAdmin() {
     }).join('');
     return '<div class="card"><h3>' + displayName(p) + ' (' + p.status.replace('_', ' ') + ')</h3>' + lines + '</div>';
   }).join('');
+  // NBA admin: same overview shape, scoped to sport=nba. A 404 just
+  // means no NBA week exists yet (before Tue Nov 10).
+  try {
+    const nba = await api('/api/admin/overview?sport=nba');
+    $('nbaAdminTotals').textContent = fmtMoney(nba.collected) + ' collected · ' + fmtMoney(nba.stillOwed) + ' still owed · ' + fmtMoney(nba.owedTotal) + ' total owed.';
+    document.querySelector('#nbaPaymentsTable tbody').innerHTML = nba.players.map((p) =>
+      '<tr><td>' + displayName(p) + '</td><td>' + (p.email || '') + '</td><td>' + p.status.replace('_', ' ') + '</td><td>' + p.pickCount + '</td><td>' + fmtMoney(p.owed) + '</td>' +
+      '<td><input type="checkbox" data-nba-paid-user="' + p.id + '"' + (p.paid ? ' checked' : '') + '> Paid</td></tr>').join('');
+    document.querySelectorAll('[data-nba-paid-user]').forEach((cb) => {
+      cb.addEventListener('change', async () => {
+        await api('/api/admin/payments', 'POST', { user_id: Number(cb.dataset.nbaPaidUser), paid: cb.checked, sport: 'nba' });
+        loadAdmin();
+      });
+    });
+    $('nbaResultsList').innerHTML = nba.games.map((g) =>
+      '<div class="game-row"><div><b>' + g.away + ' at ' + g.home + '</b><div class="kick">' + g.kickoffLabel + '</div></div>' +
+      '<select data-nba-result-game="' + g.id + '">' +
+      '<option value="">No result yet</option>' +
+      '<option value="' + g.away + '"' + (g.winner === g.away ? ' selected' : '') + '>' + g.away + '</option>' +
+      '<option value="' + g.home + '"' + (g.winner === g.home ? ' selected' : '') + '>' + g.home + '</option>' +
+      '</select></div>').join('');
+    document.querySelectorAll('[data-nba-result-game]').forEach((sel) => {
+      sel.addEventListener('change', async () => {
+        await api('/api/admin/results', 'POST', { game_id: Number(sel.dataset.nbaResultGame), winner: sel.value || null });
+        loadAdmin();
+      });
+    });
+  } catch (e) {
+    $('nbaAdminTotals').textContent = 'No NBA week yet — the first slate opens Tuesday Nov 10, 2026.';
+    document.querySelector('#nbaPaymentsTable tbody').innerHTML = '';
+    $('nbaResultsList').innerHTML = '';
+  }
   loadRecords();
 }
 
@@ -423,13 +577,54 @@ $('savePicksBtn').addEventListener('click', async () => {
   }
 });
 
+// NBA tab buttons (static HTML, attached once like the NFL ones).
+$('nbaPlayBtn').addEventListener('click', async () => {
+  await api('/api/nba/participation', 'POST', { status: 'playing' });
+  $('nbaPartMsg').textContent = "You're in for this NBA week. Make your picks below.";
+  $('nbaPartMsg').classList.remove('hidden');
+  loadNba();
+});
+$('nbaSkipBtn').addEventListener('click', async () => {
+  await api('/api/nba/participation', 'POST', { status: 'not_participating' });
+  $('nbaPartMsg').textContent = 'Marked as not participating this NBA week.';
+  $('nbaPartMsg').classList.remove('hidden');
+  loadNba();
+});
+$('nbaSavePicksBtn').addEventListener('click', async () => {
+  const gameIds = new Set(((nbaPool && nbaPool.games) || []).map((g) => String(g.id)));
+  const picks = Object.entries(nbaPicks)
+    .filter(([gid]) => gameIds.has(gid))
+    .map(([game_id, team]) => ({ game_id: Number(game_id), team }));
+  try {
+    await api('/api/nba/picks', 'POST', { picks });
+    $('nbaSaveMsg').textContent = 'Picks saved (' + picks.length + ').';
+    loadNba();
+  } catch (e) {
+    $('nbaSaveMsg').textContent = e.message;
+  }
+});
+$('nbaStandingsWeekSelect').addEventListener('change', () => loadNbaStandings(Number($('nbaStandingsWeekSelect').value)));
+$('seedNextNbaBtn').addEventListener('click', async () => {
+  $('seedNextNbaMsg').textContent = 'Seeding…';
+  try {
+    const r = await api('/api/admin/seed-next-nba-week', 'POST', {});
+    $('seedNextNbaMsg').textContent = r.seeded
+      ? ('Seeded ' + r.label + ' (' + r.gameCount + ' games).')
+      : ('Not seeded: ' + (r.reason || 'unknown') + '.');
+    loadAdmin();
+  } catch (e) {
+    $('seedNextNbaMsg').textContent = e.message;
+  }
+});
+
 $('saveSettingsBtn').addEventListener('click', async () => {
   try {
     const data = await api('/api/admin/settings', 'POST', {
       group_name: $('groupNameInput').value,
       per_pick_amount: $('wagerInput').value,
+      nba_per_pick_amount: $('nbaWagerInput').value,
     });
-    $('settingsMsg').textContent = 'Saved. Group name: "' + (data.groupName || '(none)') + '", per-pick: $' + data.perPickAmount + '.';
+    $('settingsMsg').textContent = 'Saved. Group name: "' + (data.groupName || '(none)') + '", per-pick: $' + data.perPickAmount + ' (NBA: $' + data.nbaPerPickAmount + ').';
     loadPool();
   } catch (e) {
     $('settingsMsg').textContent = e.message;
@@ -447,6 +642,7 @@ $('saveSettingsBtn').addEventListener('click', async () => {
     const weekName = info.week.label || ('Week ' + info.week.week_number);
     $('heroLock').textContent = weekName + ' · picks lock ' + fmtLock(info.week.lock_at);
     $('heroCost').textContent = fmtMoney(info.perPickAmount) + ' per pick (' + fmtMoney(info.fullSheetAmount) + ' for a full ' + info.gameCount + '-game sheet).';
+    $('heroPrice').textContent = '🏈 Weekly pool · ' + fmtMoney(info.perPickAmount) + ' a pick';
   } catch { /* keep static fallback text */ }
   const ok = await refreshMe();
   if (ok) showTab('pool');
