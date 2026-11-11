@@ -126,6 +126,11 @@ db.exec(`
     losses INTEGER NOT NULL DEFAULT 0,
     ties INTEGER NOT NULL DEFAULT 0
   );
+  CREATE TABLE IF NOT EXISTS nba_team_records (
+    team TEXT PRIMARY KEY,
+    wins INTEGER NOT NULL DEFAULT 0,
+    losses INTEGER NOT NULL DEFAULT 0
+  );
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -285,6 +290,20 @@ function seed() {
   ];
   const recIns = db.prepare('INSERT OR IGNORE INTO team_records (team, wins, losses, ties) VALUES (?, ?, ?, ?)');
   for (const [team, w, l, t] of TEAM_RECORDS) recIns.run(team, w, l, t);
+
+  // NBA: all 30 teams start 0-0. The first auto-refresh from ESPN's
+  // NBA standings feed fills in the real records; the rows exist now
+  // so the Admin NBA records editor has something to show before then.
+  // Names must match the NBA_ABBR keys below.
+  const NBA_TEAMS = [
+    'Hawks', 'Celtics', 'Nets', 'Hornets', 'Bulls', 'Cavaliers', 'Mavericks',
+    'Nuggets', 'Pistons', 'Warriors', 'Rockets', 'Pacers', 'Clippers', 'Lakers',
+    'Grizzlies', 'Heat', 'Bucks', 'Timberwolves', 'Pelicans', 'Knicks', 'Thunder',
+    'Magic', '76ers', 'Suns', 'Trail Blazers', 'Kings', 'Spurs', 'Raptors',
+    'Jazz', 'Wizards',
+  ];
+  const nbaRecIns = db.prepare('INSERT OR IGNORE INTO nba_team_records (team, wins, losses) VALUES (?, ?, ?)');
+  for (const team of NBA_TEAMS) nbaRecIns.run(team, 0, 0);
 
   // Full Week 8: 14 games, Thu Oct 29–Mon Nov 2, 2026. Added as
   // week_number 9 (8 is the mini test) with label 'Week 8' so it displays
@@ -550,6 +569,63 @@ async function maybeAutoFetchRecords() {
     if (updated) console.log('[records] auto-refreshed ' + updated + ' team record(s)');
   } catch (e) {
     console.log('[records] auto-refresh skipped: ' + (e && e.message ? e.message : e));
+  }
+}
+
+// ------------------------------------------------------------------
+// Automatic NBA team-records refresh.
+// Same rules as the NFL side, for the NBA pick sheet: the server
+// refreshes W-L records itself from ESPN's public NBA standings feed
+// — no manual update, ever. It runs on NBA pool/standings loads,
+// alongside the NBA results auto-fetch and the next-slate auto-seed,
+// throttled to one check per 10 minutes.
+// - One fetch covers all 30 teams (Eastern + Western conferences).
+// - It maps by the same ABBR_TO_NBA_TEAM map as the NBA
+//   schedule/results code, so records land on the teams the pick sheet
+//   uses (Jazz = UTAH, Warriors = GS, Pelicans = NO, Knicks = NY,
+//   Spurs = SA). Unknown abbreviations are skipped.
+// - NBA games can't tie, so there is no ties column: records display
+//   as W-L, and a 'ties' stat in the feed (if ESPN ever sends one) is
+//   ignored. Wins/losses are validated 0–82 (82-game season).
+// - ESPN is the source of truth: an admin edit in the NBA records
+//   panel is overwritten by the next refresh. The panel remains as a
+//   fallback for the (rare) case ESPN's feed is wrong or down.
+// - Any failure is logged and ignored; the old records stay on screen.
+// - ESPN_NBA_STANDINGS_URL (env) overrides the feed URL; tests use it
+//   to point at a local stub instead of the real source.
+const ESPN_NBA_STANDINGS_URL = process.env.ESPN_NBA_STANDINGS_URL || 'https://site.api.espn.com/apis/v2/sports/basketball/nba/standings';
+let lastAutoNbaRecordsAt = 0;
+
+async function maybeAutoFetchNbaRecords() {
+  try {
+    const now = Date.now();
+    if (now - lastAutoNbaRecordsAt < AUTO_FETCH_MIN_MS) return;
+    lastAutoNbaRecordsAt = now;
+    const res = await fetch(ESPN_NBA_STANDINGS_URL, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error('ESPN NBA standings HTTP ' + res.status);
+    const data = await res.json();
+    const existing = db.prepare('SELECT wins, losses FROM nba_team_records WHERE team = ?');
+    const upsert = db.prepare(`INSERT INTO nba_team_records (team, wins, losses) VALUES (?, ?, ?)
+      ON CONFLICT(team) DO UPDATE SET wins = excluded.wins, losses = excluded.losses`);
+    let updated = 0;
+    for (const child of (data.children || [])) {
+      for (const entry of ((child.standings && child.standings.entries) || [])) {
+        const team = entry.team || {};
+        const name = ABBR_TO_NBA_TEAM[String(team.abbreviation || '').toUpperCase()];
+        if (!name) continue;
+        const byName = {};
+        for (const s of (entry.stats || [])) byName[s.name] = s.value;
+        const wins = Number(byName.wins), losses = Number(byName.losses);
+        if (![wins, losses].every((n) => Number.isInteger(n) && n >= 0 && n <= 82)) continue;
+        const row = existing.get(name);
+        if (row && row.wins === wins && row.losses === losses) continue;
+        upsert.run(name, wins, losses);
+        updated++;
+      }
+    }
+    if (updated) console.log('[nba-records] auto-refreshed ' + updated + ' team record(s)');
+  } catch (e) {
+    console.log('[nba-records] auto-refresh skipped: ' + (e && e.message ? e.message : e));
   }
 }
 let lastAutoSeedAt = 0;
@@ -906,8 +982,13 @@ async function maybeAutoSeedNextNbaWeek(week, opts = {}) {
 function poolView(week) {
   const games = db.prepare('SELECT * FROM games WHERE week_id = ? ORDER BY kickoff, id').all(week.id);
   const users = db.prepare('SELECT id, username, name, is_admin FROM users ORDER BY username').all();
-  const recordRows = db.prepare('SELECT team, wins, losses, ties FROM team_records').all();
-  const recByTeam = new Map(recordRows.map((r) => [r.team, `${r.wins}-${r.losses}-${r.ties}`]));
+  // Records come from the sport's own table: NFL shows W-L-T, NBA
+  // shows W-L (no ties). The two tables never share a team name, so
+  // the pools can never mix records.
+  const recordRows = week.sport === 'nba'
+    ? db.prepare('SELECT team, wins, losses FROM nba_team_records').all()
+    : db.prepare('SELECT team, wins, losses, ties FROM team_records').all();
+  const recByTeam = new Map(recordRows.map((r) => [r.team, week.sport === 'nba' ? `${r.wins}-${r.losses}` : `${r.wins}-${r.losses}-${r.ties}`]));
   const partRows = db.prepare('SELECT user_id, status FROM participation WHERE week_id = ?').all(week.id);
   const partByUser = new Map(partRows.map((r) => [r.user_id, r.status]));
   const pickCounts = new Map(
@@ -1257,6 +1338,7 @@ async function handleApi(req, res, url) {
     await maybeAutoFetchNbaResults(week);
     const seeded = await maybeAutoSeedNextNbaWeek(week);
     if (seeded.seeded) week = currentWeek('nba');
+    await maybeAutoFetchNbaRecords();
     return sendJson(res, 200, poolView(week));
   }
 
@@ -1341,6 +1423,7 @@ async function handleApi(req, res, url) {
     await maybeAutoFetchNbaResults(week);
     const seeded = await maybeAutoSeedNextNbaWeek(week);
     if (seeded.seeded) week = currentWeek('nba');
+    await maybeAutoFetchNbaRecords();
     return sendJson(res, 200, computeStandings(week));
   }
 
@@ -1484,6 +1567,33 @@ async function handleApi(req, res, url) {
     db.prepare(`INSERT INTO team_records (team, wins, losses, ties) VALUES (?, ?, ?, ?)
       ON CONFLICT(team) DO UPDATE SET wins = excluded.wins, losses = excluded.losses, ties = excluded.ties`)
       .run(team.slice(0, 40), wins, losses, ties);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  // NBA team season records shown under each team on the NBA pick
+  // sheet. Admin-only, W-L only (NBA games can't tie). Same rules as
+  // the NFL panel: records auto-refresh from ESPN on NBA pool/standings
+  // loads; an edit here is overwritten by the next refresh, so use it
+  // only to correct a bad feed value.
+  if (req.method === 'GET' && pathName === '/api/admin/nba-records') {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
+    const rows = db.prepare('SELECT team, wins, losses FROM nba_team_records ORDER BY team').all();
+    return sendJson(res, 200, { records: rows });
+  }
+
+  if (req.method === 'POST' && pathName === '/api/admin/nba-records') {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
+    const body = await readJson(req);
+    const team = (body.team || '').trim();
+    const wins = Number(body.wins), losses = Number(body.losses);
+    if (!team || ![wins, losses].every((n) => Number.isInteger(n) && n >= 0 && n <= 82)) {
+      return sendJson(res, 400, { error: 'Team and whole-number records (0-82) are required' });
+    }
+    db.prepare(`INSERT INTO nba_team_records (team, wins, losses) VALUES (?, ?, ?)
+      ON CONFLICT(team) DO UPDATE SET wins = excluded.wins, losses = excluded.losses`)
+      .run(team.slice(0, 40), wins, losses);
     return sendJson(res, 200, { ok: true });
   }
 
