@@ -238,14 +238,14 @@ async function loadNba() {
   $('nbaPickCostLine').textContent = 'Each pick costs ' + fmtMoney(nbaPool.perPickAmount) + '. Full sheet (' + nbaPool.games.length + ' picks) = ' + fmtMoney(nbaPool.perPickAmount * nbaPool.games.length) + '.';
   $('nbaGamesList').innerHTML = nbaPool.games.map((g) => {
     const sel = nbaPicks[g.id] || '';
-    const pickBtn = (team) => {
+    const pickBtn = (team, rec) => {
       const abbr = NBA_TEAM_LOGO[team];
       const img = abbr ? '<img class="teamLogo" src="' + nbaTeamLogoUrl(team) + '" alt="" onerror="this.style.display=\'none\'">' : '';
       return '<button type="button" class="pickBtn nbaPickBtn' + (sel === team ? ' selected' : '') + '" data-game="' + g.id + '" data-team="' + team + '" ' + (locked ? 'disabled' : '') + '>' + img +
-        '<span class="team"><b>' + team + '</b></span></button>';
+        '<span class="team"><b>' + team + '</b>' + (rec ? '<span class="record">' + rec + '</span>' : '') + '</span></button>';
     };
     return '<div class="game-row"><div class="kick">' + g.kickoffLabel + (g.winner ? ' · Winner: ' + g.winner : '') + '</div>' +
-      '<div class="pickMatchup">' + pickBtn(g.away) + '<span class="vs">vs</span>' + pickBtn(g.home) + '</div></div>';
+      '<div class="pickMatchup">' + pickBtn(g.away, g.awayRecord) + '<span class="vs">vs</span>' + pickBtn(g.home, g.homeRecord) + '</div></div>';
   }).join('');
   // Tap a team to pick it; tap the picked team again to clear it.
   document.querySelectorAll('.nbaPickBtn').forEach((btn) => btn.addEventListener('click', () => {
@@ -384,6 +384,39 @@ async function loadAdmin() {
     $('nbaResultsList').innerHTML = '';
   }
   loadRecords();
+  loadNbaRecords();
+}
+
+// NBA team records editor (Admin → NBA). Same shape as loadRecords
+// for the NFL, but W-L only — NBA games can't tie. A hand edit is
+// overwritten by the next automatic ESPN refresh.
+async function loadNbaRecords() {
+  try {
+    const data = await api('/api/admin/nba-records');
+    $('nbaRecordsList').innerHTML = data.records.map((r) =>
+      '<div class="rec-row" data-team="' + r.team + '"><b>' + r.team + '</b>' +
+      '<label>W <input type="number" min="0" max="82" data-nba-rec-w value="' + r.wins + '"></label>' +
+      '<label>L <input type="number" min="0" max="82" data-nba-rec-l value="' + r.losses + '"></label>' +
+      '<button data-nba-rec-save>Save</button></div>').join('');
+    document.querySelectorAll('[data-nba-rec-save]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const row = btn.closest('.rec-row');
+        try {
+          await api('/api/admin/nba-records', 'POST', {
+            team: row.dataset.team,
+            wins: row.querySelector('[data-nba-rec-w]').value,
+            losses: row.querySelector('[data-nba-rec-l]').value,
+          });
+          $('nbaRecordsMsg').textContent = 'Saved ' + row.dataset.team + '.';
+        } catch (e) {
+          $('nbaRecordsMsg').textContent = e.message;
+        }
+      });
+    });
+  } catch (e) {
+    $('nbaRecordsList').innerHTML = '';
+    $('nbaRecordsMsg').textContent = e.message;
+  }
 }
 
 async function loadRecords() {
